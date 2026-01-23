@@ -329,6 +329,15 @@
                 }
             } else {
                 console.warn('[Lampa Sync] Cannot find file_id for tmdb:', tmdbId, '- progress not applied to file_view');
+                // Сохраняем прогресс для применения позже, когда file_id появится
+                if (data.time !== undefined && data.percent !== undefined) {
+                    pendingProgress = {
+                        tmdbId: tmdbId,
+                        time: data.time,
+                        percent: data.percent
+                    };
+                    console.log('[Lampa Sync] Progress saved for later application:', pendingProgress);
+                }
             }
 
             // Синхронизируем favorite
@@ -453,6 +462,7 @@
     let currentTmdbId = null;
     let currentFileId = null;
     let lastSavedTime = 0;
+    let pendingProgress = null; // Сохраняем прогресс, если file_id ещё не найден
 
     /**
      * Обработчик события start
@@ -604,6 +614,20 @@
         let lastFileView = getStorage('file_view', {});
         let lastFileViewTime = {};
         let lastUrl = window.location.href;
+        let lastTmdbId = null;
+        
+        // Функция для проверки и загрузки прогресса при изменении TMDB ID
+        function checkAndSyncProgress() {
+            const currentTmdbId = getTmdbIdFromUrl();
+            
+            // Если TMDB ID изменился, загружаем прогресс
+            if (currentTmdbId && currentTmdbId !== lastTmdbId) {
+                console.log('[Lampa Sync] TMDB ID changed:', lastTmdbId, '->', currentTmdbId);
+                lastTmdbId = currentTmdbId;
+                currentTmdbId = currentTmdbId; // Обновляем глобальную переменную
+                handleStart();
+            }
+        }
         
         // Функция для отслеживания изменений
         function trackChanges() {
@@ -616,15 +640,20 @@
             if (currentUrl !== lastUrl) {
                 const tmdbId = getTmdbIdFromUrl();
                 if (tmdbId) {
-                    console.log('[Lampa Sync] URL changed, new movie detected');
+                    console.log('[Lampa Sync] URL changed, new movie detected:', tmdbId);
+                    lastTmdbId = tmdbId;
                     handleStart();
                 }
                 lastUrl = currentUrl;
+            } else {
+                // Даже если URL не изменился, проверяем TMDB ID (может измениться параметр)
+                checkAndSyncProgress();
             }
             
             // Если появился новый file_view, это start
             if (currentFileViewKeys.length > lastFileViewKeys.length) {
                 console.log('[Lampa Sync] New file_view detected');
+                checkAndSyncProgress();
                 handleStart();
             }
             
@@ -654,8 +683,45 @@
             lastFileView = JSON.parse(JSON.stringify(currentFileView)); // Глубокая копия
         }
         
-        // Отслеживаем изменения каждые 2 секунды
-        setInterval(trackChanges, 2000);
+        // Отслеживаем изменения каждые 1 секунду (более часто для быстрой синхронизации)
+        setInterval(trackChanges, 1000);
+        
+        // Используем Lampa.Listener для отслеживания открытия карточек (как в примере плагина)
+        if (window.Lampa && window.Lampa.Listener) {
+            try {
+                Lampa.Listener.follow('full', function(e) {
+                    if (e.type === 'complite') {
+                        const tmdbId = getTmdbIdFromUrl();
+                        if (tmdbId && tmdbId !== lastTmdbId) {
+                            console.log('[Lampa Sync] Card opened via Lampa.Listener, TMDB:', tmdbId);
+                            lastTmdbId = tmdbId;
+                            // Небольшая задержка для появления file_view
+                            setTimeout(() => {
+                                handleStart();
+                            }, 500);
+                        }
+                    }
+                });
+                console.log('[Lampa Sync] Lampa.Listener registered for card opening');
+            } catch (e) {
+                console.warn('[Lampa Sync] Could not register Lampa.Listener:', e);
+            }
+        }
+        
+        // Дополнительная проверка при открытии карточки - даже без запуска плеера
+        // Проверяем наличие TMDB ID в URL каждую секунду
+        setInterval(() => {
+            const tmdbId = getTmdbIdFromUrl();
+            if (tmdbId && tmdbId !== lastTmdbId) {
+                console.log('[Lampa Sync] TMDB ID detected in URL (card opened):', tmdbId);
+                lastTmdbId = tmdbId;
+                // Загружаем прогресс сразу, даже если плеер не запущен
+                // Это позволит синхронизировать favorite и подготовить file_view
+                loadProgress(tmdbId).catch(e => {
+                    console.error('[Lampa Sync] Error loading progress on card open:', e);
+                });
+            }
+        }, 1000);
         
         // Слушаем события страницы
         window.addEventListener('beforeunload', () => {
@@ -664,16 +730,43 @@
         
         // Отслеживаем изменения URL через History API
         let originalPushState = history.pushState;
+        let originalReplaceState = history.replaceState;
+        
         history.pushState = function() {
             originalPushState.apply(history, arguments);
             setTimeout(() => {
                 const tmdbId = getTmdbIdFromUrl();
-                if (tmdbId) {
-                    console.log('[Lampa Sync] History changed, new movie detected');
+                if (tmdbId && tmdbId !== lastTmdbId) {
+                    console.log('[Lampa Sync] History.pushState - new movie detected:', tmdbId);
+                    lastTmdbId = tmdbId;
                     handleStart();
                 }
-            }, 500);
+            }, 300);
         };
+        
+        history.replaceState = function() {
+            originalReplaceState.apply(history, arguments);
+            setTimeout(() => {
+                const tmdbId = getTmdbIdFromUrl();
+                if (tmdbId && tmdbId !== lastTmdbId) {
+                    console.log('[Lampa Sync] History.replaceState - new movie detected:', tmdbId);
+                    lastTmdbId = tmdbId;
+                    handleStart();
+                }
+            }, 300);
+        };
+        
+        // Также отслеживаем popstate (навигация назад/вперёд)
+        window.addEventListener('popstate', function() {
+            setTimeout(() => {
+                const tmdbId = getTmdbIdFromUrl();
+                if (tmdbId && tmdbId !== lastTmdbId) {
+                    console.log('[Lampa Sync] PopState - new movie detected:', tmdbId);
+                    lastTmdbId = tmdbId;
+                    handleStart();
+                }
+            }, 300);
+        });
 
         // Периодическое автосохранение (каждые 30 секунд во время просмотра)
         setInterval(() => {
@@ -698,15 +791,55 @@
 
         // Обновляем currentFileId периодически (на случай если он появился позже)
         setInterval(() => {
+            // Проверяем изменение TMDB ID в URL (для синхронизации без перезагрузки)
+            const urlTmdbId = getTmdbIdFromUrl();
+            if (urlTmdbId && urlTmdbId !== lastTmdbId) {
+                console.log('[Lampa Sync] TMDB ID changed in periodic check:', lastTmdbId, '->', urlTmdbId);
+                lastTmdbId = urlTmdbId;
+                handleStart();
+            }
+            
+            // Если есть pending progress и появился file_id, применяем его
+            if (pendingProgress && !currentFileId) {
+                const fileId = getCurrentFileId();
+                if (fileId) {
+                    const config = getConfig();
+                    const fileView = getStorage('file_view', {});
+                    
+                    if (fileView[fileId] && pendingProgress.time >= config.MIN_SEEK_TIME) {
+                        fileView[fileId].time = pendingProgress.time;
+                        fileView[fileId].percent = pendingProgress.percent;
+                        setStorage('file_view', fileView);
+                        console.log('[Lampa Sync] Applied pending progress to file_view[' + fileId + ']:', pendingProgress);
+                        pendingProgress = null;
+                        currentFileId = fileId;
+                    }
+                }
+            }
+            
             if (currentTmdbId && !currentFileId) {
                 const fileId = getCurrentFileId();
                 if (fileId) {
                     currentFileId = fileId;
                     console.log('[Lampa Sync] file_id found:', fileId);
-                    // Загружаем прогресс, если ещё не загружали
-                    loadProgress(currentTmdbId).catch(e => {
-                        console.error('[Lampa Sync] Delayed load error:', e);
-                    });
+                    
+                    // Если есть pending progress, применяем его
+                    if (pendingProgress && pendingProgress.tmdbId === currentTmdbId) {
+                        const config = getConfig();
+                        const fileView = getStorage('file_view', {});
+                        if (fileView[fileId] && pendingProgress.time >= config.MIN_SEEK_TIME) {
+                            fileView[fileId].time = pendingProgress.time;
+                            fileView[fileId].percent = pendingProgress.percent;
+                            setStorage('file_view', fileView);
+                            console.log('[Lampa Sync] Applied pending progress to file_view[' + fileId + ']:', pendingProgress);
+                            pendingProgress = null;
+                        }
+                    } else {
+                        // Загружаем прогресс, если ещё не загружали
+                        loadProgress(currentTmdbId).catch(e => {
+                            console.error('[Lampa Sync] Delayed load error:', e);
+                        });
+                    }
                 }
             }
         }, 2000);
