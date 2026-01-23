@@ -195,6 +195,9 @@
                 if (response.status === 401) {
                     throw new Error('Unauthorized: Check SYNC_PASSWORD in settings');
                 }
+                if (response.status === 413) {
+                    throw new Error('Request too large (413): The favorite object is too big. Try reducing the size or contact server administrator.');
+                }
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
 
@@ -330,6 +333,39 @@
                 return;
             }
 
+            // Проверяем размер favorite перед отправкой
+            const favoriteSize = JSON.stringify(favorite).length;
+            const maxSize = 10 * 1024 * 1024; // 10MB
+            
+            if (favoriteSize > maxSize) {
+                console.warn('[Lampa Sync] Favorite object is too large:', favoriteSize, 'bytes. Sending only essential data.');
+                // Отправляем только минимально необходимые данные
+                const minimalFavorite = {
+                    card: favorite.card || [],
+                    like: favorite.like || [],
+                    watch: favorite.watch || [],
+                    book: favorite.book || [],
+                    history: favorite.history || [],
+                    look: favorite.look || [],
+                    viewed: favorite.viewed || [],
+                    scheduled: favorite.scheduled || [],
+                    continued: favorite.continued || [],
+                    thrown: favorite.thrown || []
+                };
+                
+                const payload = {
+                    tmdb: tmdbId,
+                    time: progress.time || 0,
+                    percent: progress.percent || 0,
+                    favorite: minimalFavorite
+                };
+                
+                console.log('[Lampa Sync] Saving progress with minimal favorite (size:', JSON.stringify(minimalFavorite).length, 'bytes)');
+                const result = await apiRequest('/progress', 'POST', payload);
+                console.log('[Lampa Sync] Progress saved:', result);
+                return result;
+            }
+
             const payload = {
                 tmdb: tmdbId,
                 time: progress.time || 0,
@@ -337,14 +373,20 @@
                 favorite: favorite
             };
 
-            console.log('[Lampa Sync] Saving progress:', payload);
+            console.log('[Lampa Sync] Saving progress (favorite size:', favoriteSize, 'bytes)');
             
             const result = await apiRequest('/progress', 'POST', payload);
             console.log('[Lampa Sync] Progress saved:', result);
             
             return result;
         } catch (e) {
-            console.error('[Lampa Sync] Error saving progress:', e);
+            const errorMsg = e.message || String(e);
+            if (errorMsg.includes('413') || errorMsg.includes('too large')) {
+                console.error('[Lampa Sync] Request too large. Try reducing favorite size or increase server limit.');
+                console.error('[Lampa Sync] Error details:', errorMsg);
+            } else {
+                console.error('[Lampa Sync] Error saving progress:', e);
+            }
         }
     }
 
