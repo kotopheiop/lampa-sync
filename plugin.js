@@ -195,6 +195,13 @@
 
             return await response.json();
         } catch (e) {
+            // Проверяем, является ли это ошибкой CORS
+            if (e.message && (e.message.includes('CORS') || e.message.includes('Failed to fetch') || e.message.includes('ERR_FAILED'))) {
+                const errorMsg = 'CORS error: Server may not be accessible from this origin. ' +
+                    'If using localhost, try using your local IP address (e.g., http://192.168.1.100:3000) or set up CORS on the server.';
+                console.warn('[Lampa Sync]', errorMsg);
+                throw new Error(errorMsg);
+            }
             console.error('[Lampa Sync] API request error:', e);
             throw e;
         }
@@ -428,10 +435,20 @@
             // Проверяем доступность сервера
             apiRequest('/health')
                 .then(data => {
-                    console.log('[Lampa Sync] Server is available:', data);
+                    console.log('[Lampa Sync] ✅ Server is available:', data);
                 })
                 .catch(e => {
-                    console.warn('[Lampa Sync] Server is not available:', e.message);
+                    // Более информативное сообщение об ошибке
+                    if (e.message && e.message.includes('CORS')) {
+                        console.warn('[Lampa Sync] ⚠️ CORS error - server may not be accessible from this origin.');
+                        console.warn('[Lampa Sync] 💡 Solutions:');
+                        console.warn('[Lampa Sync]   1. Use your local IP instead of localhost (e.g., http://192.168.1.100:3000)');
+                        console.warn('[Lampa Sync]   2. Make sure CORS is enabled on the server');
+                        console.warn('[Lampa Sync]   3. For production, use HTTPS with proper CORS configuration');
+                    } else {
+                        console.warn('[Lampa Sync] ⚠️ Server is not available:', e.message);
+                        console.warn('[Lampa Sync] Make sure the server is running and the URL is correct.');
+                    }
                 });
         }
 
