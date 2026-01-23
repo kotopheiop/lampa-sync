@@ -280,7 +280,39 @@
             const config = getConfig();
 
             // Обновляем file_view
-            const fileId = getCurrentFileId();
+            // Пробуем найти правильный file_id через маппинг с сервера
+            let fileId = getCurrentFileId();
+            
+            // Если есть маппинг с сервера, пробуем найти file_id по tmdb
+            if (data.file_mapping && tmdbId) {
+                // Ищем file_id, который соответствует этому tmdb
+                for (const [fid, tmdb] of Object.entries(data.file_mapping)) {
+                    if (tmdb === tmdbId) {
+                        fileId = fid;
+                        console.log('[Lampa Sync] Found file_id from mapping:', fileId, 'for tmdb:', tmdbId);
+                        break;
+                    }
+                }
+            }
+            
+            // Если file_id не найден, пробуем найти по порядку в favorite.card
+            if (!fileId) {
+                const favorite = getStorage('favorite', {});
+                const cardArray = favorite.card || [];
+                const tmdbIndex = cardArray.indexOf(tmdbId);
+                
+                if (tmdbIndex >= 0) {
+                    const fileView = getStorage('file_view', {});
+                    const fileViewKeys = Object.keys(fileView);
+                    
+                    // Предполагаем, что порядок file_view соответствует порядку favorite.card
+                    if (fileViewKeys.length > tmdbIndex) {
+                        fileId = fileViewKeys[tmdbIndex];
+                        console.log('[Lampa Sync] Found file_id by index:', fileId, 'at index', tmdbIndex);
+                    }
+                }
+            }
+            
             if (fileId && data.time !== undefined && data.percent !== undefined) {
                 const fileView = getStorage('file_view', {});
                 
@@ -290,9 +322,13 @@
                         fileView[fileId].time = data.time;
                         fileView[fileId].percent = data.percent;
                         setStorage('file_view', fileView);
-                        console.log('[Lampa Sync] file_view updated');
+                        console.log('[Lampa Sync] file_view[' + fileId + '] updated: time=' + data.time + ', percent=' + data.percent);
                     }
+                } else {
+                    console.warn('[Lampa Sync] file_view[' + fileId + '] not found, cannot update progress');
                 }
+            } else {
+                console.warn('[Lampa Sync] Cannot find file_id for tmdb:', tmdbId, '- progress not applied to file_view');
             }
 
             // Синхронизируем favorite
@@ -357,10 +393,11 @@
                     tmdb: tmdbId,
                     time: progress.time || 0,
                     percent: progress.percent || 0,
-                    favorite: minimalFavorite
+                    favorite: minimalFavorite,
+                    file_id: fileId // Отправляем file_id для маппинга на сервере
                 };
                 
-                console.log('[Lampa Sync] Saving progress with minimal favorite (size:', JSON.stringify(minimalFavorite).length, 'bytes)');
+                console.log('[Lampa Sync] Saving progress with minimal favorite (size:', JSON.stringify(minimalFavorite).length, 'bytes, file_id:', fileId, ', tmdb:', tmdbId, ')');
                 const result = await apiRequest('/progress', 'POST', payload);
                 console.log('[Lampa Sync] Progress saved:', result);
                 return result;
@@ -370,10 +407,11 @@
                 tmdb: tmdbId,
                 time: progress.time || 0,
                 percent: progress.percent || 0,
-                favorite: favorite
+                favorite: favorite,
+                file_id: fileId // Отправляем file_id для маппинга на сервере
             };
 
-            console.log('[Lampa Sync] Saving progress (favorite size:', favoriteSize, 'bytes)');
+            console.log('[Lampa Sync] Saving progress (favorite size:', favoriteSize, 'bytes, file_id:', fileId, ', tmdb:', tmdbId, ')');
             
             const result = await apiRequest('/progress', 'POST', payload);
             console.log('[Lampa Sync] Progress saved:', result);
@@ -440,7 +478,25 @@
         // Получаем file_id
         let fileId = getCurrentFileId();
         
-        // Если file_id не найден сразу, ждём появления file_view
+        // Если file_id не найден сразу, пробуем найти по индексу в favorite.card
+        if (!fileId) {
+            const favorite = getStorage('favorite', {});
+            const cardArray = favorite.card || [];
+            const tmdbIndex = cardArray.indexOf(tmdbId);
+            
+            if (tmdbIndex >= 0) {
+                const fileView = getStorage('file_view', {});
+                const fileViewKeys = Object.keys(fileView);
+                
+                // Предполагаем, что порядок file_view соответствует порядку favorite.card
+                if (fileViewKeys.length > tmdbIndex) {
+                    fileId = fileViewKeys[tmdbIndex];
+                    console.log('[Lampa Sync] Found file_id by favorite.card index:', fileId, 'at index', tmdbIndex);
+                }
+            }
+        }
+        
+        // Если file_id всё ещё не найден, ждём появления file_view
         if (!fileId) {
             console.log('[Lampa Sync] No file_id found, waiting for file_view...');
             
@@ -448,6 +504,22 @@
             for (let i = 0; i < 10; i++) {
                 await new Promise(resolve => setTimeout(resolve, 500));
                 fileId = getCurrentFileId();
+                
+                // Также пробуем найти по индексу
+                if (!fileId) {
+                    const favorite = getStorage('favorite', {});
+                    const cardArray = favorite.card || [];
+                    const tmdbIndex = cardArray.indexOf(tmdbId);
+                    
+                    if (tmdbIndex >= 0) {
+                        const fileView = getStorage('file_view', {});
+                        const fileViewKeys = Object.keys(fileView);
+                        if (fileViewKeys.length > tmdbIndex) {
+                            fileId = fileViewKeys[tmdbIndex];
+                        }
+                    }
+                }
+                
                 if (fileId) break;
             }
             
