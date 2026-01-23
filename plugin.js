@@ -179,6 +179,11 @@
                     'Authorization': `Bearer ${config.SYNC_PASSWORD}`
                 }
             };
+            
+            // Обход страницы-предупреждения ngrok (для бесплатной версии)
+            if (url.includes('ngrok') || url.includes('ngrok-free') || url.includes('ngrok.io')) {
+                options.headers['ngrok-skip-browser-warning'] = 'true';
+            }
 
             if (body) {
                 options.body = JSON.stringify(body);
@@ -193,15 +198,35 @@
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
 
+            // Проверяем, что ответ действительно JSON, а не HTML (например, страница ngrok)
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                if (text.includes('<!DOCTYPE') || text.includes('<html')) {
+                    throw new Error('Received HTML instead of JSON. If using ngrok, make sure to add header "ngrok-skip-browser-warning: true" or visit the URL in browser first to bypass the warning page.');
+                }
+                throw new Error(`Unexpected content type: ${contentType}`);
+            }
+
             return await response.json();
         } catch (e) {
-            // Проверяем, является ли это ошибкой CORS
-            if (e.message && (e.message.includes('CORS') || e.message.includes('Failed to fetch') || e.message.includes('ERR_FAILED'))) {
+            // Определяем тип ошибки для более информативного сообщения
+            const errorMessage = e.message || String(e);
+            
+            if (errorMessage.includes('ERR_CONNECTION_REFUSED') || errorMessage.includes('Failed to fetch')) {
+                // Ошибка подключения - сервер не запущен или недоступен
+                const errorMsg = 'Connection refused: Server is not running or not accessible. ' +
+                    'Make sure the server is started and listening on 0.0.0.0 (not just localhost).';
+                console.warn('[Lampa Sync]', errorMsg);
+                throw new Error(errorMsg);
+            } else if (errorMessage.includes('CORS') || errorMessage.includes('blocked by CORS')) {
+                // Ошибка CORS
                 const errorMsg = 'CORS error: Server may not be accessible from this origin. ' +
                     'If using localhost, try using your local IP address (e.g., http://192.168.1.100:3000) or set up CORS on the server.';
                 console.warn('[Lampa Sync]', errorMsg);
                 throw new Error(errorMsg);
             }
+            
             console.error('[Lampa Sync] API request error:', e);
             throw e;
         }
@@ -439,14 +464,23 @@
                 })
                 .catch(e => {
                     // Более информативное сообщение об ошибке
-                    if (e.message && e.message.includes('CORS')) {
+                    const errorMsg = e.message || String(e);
+                    
+                    if (errorMsg.includes('Connection refused') || errorMsg.includes('ERR_CONNECTION_REFUSED')) {
+                        console.warn('[Lampa Sync] ⚠️ Connection refused - server is not running or not accessible.');
+                        console.warn('[Lampa Sync] 💡 Solutions:');
+                        console.warn('[Lampa Sync]   1. Make sure the server is running: cd server && npm start');
+                        console.warn('[Lampa Sync]   2. Check that the server listens on 0.0.0.0 (not just localhost)');
+                        console.warn('[Lampa Sync]   3. Check Windows Firewall - port 3000 should be allowed');
+                        console.warn('[Lampa Sync]   4. Verify the server URL in settings matches your IP: http://192.168.1.193:3000');
+                    } else if (errorMsg.includes('CORS')) {
                         console.warn('[Lampa Sync] ⚠️ CORS error - server may not be accessible from this origin.');
                         console.warn('[Lampa Sync] 💡 Solutions:');
-                        console.warn('[Lampa Sync]   1. Use your local IP instead of localhost (e.g., http://192.168.1.100:3000)');
+                        console.warn('[Lampa Sync]   1. Use your local IP instead of localhost (e.g., http://192.168.1.193:3000)');
                         console.warn('[Lampa Sync]   2. Make sure CORS is enabled on the server');
                         console.warn('[Lampa Sync]   3. For production, use HTTPS with proper CORS configuration');
                     } else {
-                        console.warn('[Lampa Sync] ⚠️ Server is not available:', e.message);
+                        console.warn('[Lampa Sync] ⚠️ Server is not available:', errorMsg);
                         console.warn('[Lampa Sync] Make sure the server is running and the URL is correct.');
                     }
                 });
