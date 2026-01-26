@@ -965,13 +965,13 @@
         
         // Функция для проверки и загрузки прогресса при изменении TMDB ID
         function checkAndSyncProgress() {
-            const currentTmdbId = getTmdbIdFromUrl();
+            const urlTmdbId = getTmdbIdFromUrl();
             
             // Если TMDB ID изменился, загружаем прогресс
-            if (currentTmdbId && currentTmdbId !== lastTmdbId) {
-                console.log('[Lampa Sync] TMDB ID changed:', lastTmdbId, '->', currentTmdbId);
-                lastTmdbId = currentTmdbId;
-                currentTmdbId = currentTmdbId; // Обновляем глобальную переменную
+            if (urlTmdbId && urlTmdbId !== lastTmdbId) {
+                console.log('[Lampa Sync] TMDB ID changed:', lastTmdbId, '->', urlTmdbId);
+                lastTmdbId = urlTmdbId;
+                currentTmdbId = urlTmdbId; // Обновляем глобальную переменную
                 handleStart();
             }
         }
@@ -1381,7 +1381,93 @@
     // ==================== НАСТРОЙКИ LAMPA ====================
     
     /**
-     * Создание модального окна для настроек
+     * Добавление пункта меню в настройки
+     */
+    function addSettingsMenu() {
+        try {
+            if (Lampa.Settings && Lampa.Settings.main && Lampa.Settings.main() && 
+                !Lampa.Settings.main().render().find('[data-component="lampa_sync"]').length) {
+                
+                const field = $(`
+                    <div class="settings-folder selector" data-component="lampa_sync">
+                        <div class="settings-folder__icon">
+                            <svg height="260" viewBox="0 0 244 260" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M122 0L0 60v200h244V60L122 0zm0 40l90 50v150H32V90l90-50z" fill="white"/>
+                                <path d="M122 100l-40 20v80h80v-80l-40-20z" fill="white"/>
+                            </svg>
+                        </div>
+                        <div class="settings-folder__name">Синхронизация прогресса</div>
+                    </div>
+                `);
+                
+                // Добавляем после пункта "more" или в конец
+                const moreElement = Lampa.Settings.main().render().find('[data-component="more"]');
+                if (moreElement.length) {
+                    moreElement.after(field);
+                } else {
+                    Lampa.Settings.main().render().append(field);
+                }
+                
+                Lampa.Settings.main().update();
+                console.log('[Lampa Sync] ✅ Settings menu added');
+                return true;
+            }
+            return false;
+        } catch (e) {
+            console.error('[Lampa Sync] Error adding settings menu:', e);
+            return false;
+        }
+    }
+    
+    /**
+     * Инициализация настроек - добавление шаблона и полей
+     */
+    function initSettingsTemplate() {
+        try {
+            if (!window.Lampa || !window.Lampa.Template) {
+                console.log('[Lampa Sync] Lampa.Template not available yet');
+                return false;
+            }
+            
+            const template = `
+                <div>
+                    <div class="settings-param selector" data-name="lampa_sync_server_url" data-type="input" placeholder="http://localhost:3000">
+                        <div class="settings-param__name">URL сервера синхронизации</div>
+                        <div class="settings-param__value"></div>
+                    </div>
+                    <div class="settings-param selector" data-name="lampa_sync_password" data-type="input" data-string="true" placeholder="Введите пароль">
+                        <div class="settings-param__name">Пароль синхронизации</div>
+                        <div class="settings-param__value"></div>
+                    </div>
+                </div>
+            `;
+            
+            // Добавляем шаблон
+            Lampa.Template.add('settings_lampa_sync', template);
+            console.log('[Lampa Sync] ✅ Settings template added');
+            
+            // Слушаем открытие настроек
+            if (Lampa.Settings && Lampa.Settings.listener) {
+                Lampa.Settings.listener.follow('open', function(e) {
+                    if (e.name == 'lampa_sync') {
+                        // Настройки открыты
+                        console.log('[Lampa Sync] Settings opened');
+                        
+                        // Lampa автоматически обрабатывает поля с data-type="input"
+                        // Значения сохраняются через Lampa.Storage автоматически
+                    }
+                });
+            }
+            
+            return true;
+        } catch (e) {
+            console.error('[Lampa Sync] Error initializing settings template:', e);
+            return false;
+        }
+    }
+    
+    /**
+     * Создание модального окна для настроек (fallback)
      */
     function showSettingsModal() {
         try {
@@ -1686,41 +1772,68 @@
         }
     }
     
-    // Начинаем попытки добавления настроек после загрузки Lampa
-    // Используем несколько стратегий для максимальной совместимости
-    function initSettings() {
-        // Стратегия 1: Если Lampa уже загружен
-        if (window.Lampa && window.Lampa.SettingsApi) {
-            setTimeout(tryAddSettings, 500);
-            return;
-        }
-        
-        // Стратегия 2: Ждём события загрузки
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', function() {
-                setTimeout(tryAddSettings, 1500);
-            });
+    // Инициализация настроек по образцу другого плагина
+    function initSettingsNew() {
+        // Добавляем шаблон настроек
+        if (window.Lampa && window.Lampa.Template) {
+            initSettingsTemplate();
         } else {
-            // Стратегия 3: Пробуем через интервалы
-            setTimeout(tryAddSettings, 1500);
+            // Ждём загрузки Lampa
+            const checkTemplate = setInterval(() => {
+                if (window.Lampa && window.Lampa.Template) {
+                    clearInterval(checkTemplate);
+                    initSettingsTemplate();
+                }
+            }, 500);
+            
+            setTimeout(() => clearInterval(checkTemplate), 10000);
         }
         
-        // Стратегия 4: Слушаем появление Lampa
-        let checkLampa = setInterval(function() {
-            if (window.Lampa && window.Lampa.SettingsApi) {
-                clearInterval(checkLampa);
-                tryAddSettings();
+        // Добавляем пункт меню в настройки
+        function tryAddMenu() {
+            if (window.Lampa && window.Lampa.Settings && window.Lampa.Settings.main) {
+                if (addSettingsMenu()) {
+                    console.log('[Lampa Sync] ✅ Settings menu added successfully');
+                } else {
+                    // Пробуем ещё раз через некоторое время
+                    setTimeout(tryAddMenu, 1000);
+                }
+            } else {
+                // Ждём появления Settings
+                setTimeout(tryAddMenu, 500);
             }
-        }, 500);
+        }
         
-        // Останавливаем проверку через 10 секунд
-        setTimeout(function() {
-            clearInterval(checkLampa);
-        }, 10000);
+        // Ждём готовности Lampa
+        if (window.appready) {
+            setTimeout(tryAddMenu, 500);
+        } else {
+            if (window.Lampa && window.Lampa.Listener) {
+                Lampa.Listener.follow('app', function(e) {
+                    if (e.type == 'ready') {
+                        setTimeout(tryAddMenu, 500);
+                    }
+                });
+            } else {
+                // Пробуем через интервал
+                const checkListener = setInterval(() => {
+                    if (window.Lampa && window.Lampa.Listener) {
+                        clearInterval(checkListener);
+                        Lampa.Listener.follow('app', function(e) {
+                            if (e.type == 'ready') {
+                                setTimeout(tryAddMenu, 500);
+                            }
+                        });
+                    }
+                }, 500);
+                
+                setTimeout(() => clearInterval(checkListener), 10000);
+            }
+        }
     }
     
     // Запускаем инициализацию настроек
-    initSettings();
+    initSettingsNew();
 
     // Запускаем плагин
     if (document.readyState === 'loading') {
