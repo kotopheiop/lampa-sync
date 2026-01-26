@@ -2056,6 +2056,29 @@
             if (urlInput) {
                 urlInput.readOnly = false;
                 urlInput.disabled = false;
+                urlInput.removeAttribute('readonly');
+                urlInput.removeAttribute('disabled');
+                
+                // КРИТИЧНО: Предотвращаем перехват событий клавиатуры Lampa
+                // Lampa может перехватывать Backspace для навигации, нужно остановить это
+                urlInput.addEventListener('keydown', function(e) {
+                    // Разрешаем все клавиши внутри поля ввода
+                    e.stopPropagation();
+                    // Разрешаем Backspace, Delete и другие клавиши редактирования
+                    if (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'ArrowLeft' || 
+                        e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
+                        e.stopImmediatePropagation();
+                    }
+                }, true); // Используем capture phase для перехвата до Lampa
+                
+                urlInput.addEventListener('keyup', function(e) {
+                    e.stopPropagation();
+                }, true);
+                
+                urlInput.addEventListener('keypress', function(e) {
+                    e.stopPropagation();
+                }, true);
+                
                 setTimeout(() => {
                     urlInput.focus();
                     urlInput.select();
@@ -2065,6 +2088,36 @@
             if (passwordInput) {
                 passwordInput.readOnly = false;
                 passwordInput.disabled = false;
+                passwordInput.removeAttribute('readonly');
+                passwordInput.removeAttribute('disabled');
+                
+                // Аналогично для поля пароля
+                passwordInput.addEventListener('keydown', function(e) {
+                    e.stopPropagation();
+                    if (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'ArrowLeft' || 
+                        e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
+                        e.stopImmediatePropagation();
+                    }
+                }, true);
+                
+                passwordInput.addEventListener('keyup', function(e) {
+                    e.stopPropagation();
+                }, true);
+                
+                passwordInput.addEventListener('keypress', function(e) {
+                    e.stopPropagation();
+                }, true);
+            }
+            
+            // Также предотвращаем перехват событий на уровне модального окна
+            if (modal) {
+                modal.addEventListener('keydown', function(e) {
+                    // Если фокус на поле ввода, не перехватываем события
+                    const activeElement = document.activeElement;
+                    if (activeElement && (activeElement === urlInput || activeElement === passwordInput)) {
+                        e.stopPropagation();
+                    }
+                }, true);
             }
             
             // Обработчик сохранения
@@ -2396,6 +2449,67 @@
     // Логируем для отладки
     console.log('[Lampa Sync] Exported functions:', Object.keys(window.LampaSync));
     console.log('[Lampa Sync] Device ID:', getDeviceId());
+    
+    // Также создаём глобальную функцию для очистки, доступную даже если плагин не загрузился
+    // Это позволяет очистить настройки даже при ошибках инициализации
+    window.LampaSyncCleanSettings = function() {
+        try {
+            console.log('[Lampa Sync] Starting full settings cleanup...');
+            
+            // Очищаем все ключи, которые являются URL
+            const allKeys = Object.keys(localStorage);
+            let cleanedCount = 0;
+            allKeys.forEach(key => {
+                if (key.startsWith('http://') || key.startsWith('https://')) {
+                    console.log('[Lampa Sync] Removing:', key);
+                    localStorage.removeItem(key);
+                    cleanedCount++;
+                }
+            });
+            
+            // Удаляем наши параметры
+            localStorage.removeItem('lampa_sync_server_url');
+            localStorage.removeItem('lampa_sync_password');
+            
+            // Пытаемся использовать Lampa.Storage, если доступен
+            try {
+                if (window.Lampa && window.Lampa.Storage && window.Lampa.Storage.remove) {
+                    window.Lampa.Storage.remove('lampa_sync_server_url');
+                    window.Lampa.Storage.remove('lampa_sync_password');
+                }
+            } catch (e) {
+                // Игнорируем, если Lampa недоступен
+            }
+            
+            // Устанавливаем значения по умолчанию
+            localStorage.setItem('lampa_sync_server_url', 'http://localhost:3000');
+            localStorage.setItem('lampa_sync_password', '');
+            
+            try {
+                if (window.Lampa && window.Lampa.Storage && window.Lampa.Storage.set) {
+                    window.Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                    window.Lampa.Storage.set('lampa_sync_password', '');
+                }
+            } catch (e) {
+                // Игнорируем, если Lampa недоступен
+            }
+            
+            console.log('[Lampa Sync] ✅ Cleanup complete. Removed', cleanedCount, 'invalid keys.');
+            console.log('[Lampa Sync] Please reload the page: location.reload()');
+            
+            return {
+                cleaned: cleanedCount,
+                message: 'Settings cleaned. Please reload the page.'
+            };
+        } catch (e) {
+            console.error('[Lampa Sync] Error during cleanup:', e);
+            return {
+                error: e.message
+            };
+        }
+    };
+    
+    console.log('[Lampa Sync] ✅ Cleanup function available as: window.LampaSyncCleanSettings()');
     
     // Показываем инструкцию и модальное окно при загрузке, если настройки не заданы
     setTimeout(() => {
