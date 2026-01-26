@@ -381,6 +381,73 @@
     }
 
     /**
+     * Получение текущего времени воспроизведения
+     * Поддерживает как HTML5 video (браузер/десктоп), так и внешние плееры (Android)
+     */
+    function getCurrentPlaybackTime() {
+        try {
+            // Способ 1: HTML5 video элемент (браузер/десктоп)
+            const video = document.querySelector('video');
+            if (video && !video.paused && video.currentTime) {
+                return video.currentTime;
+            }
+            
+            // Способ 2: Через Lampa.Player API
+            if (window.Lampa && window.Lampa.Player) {
+                const player = window.Lampa.Player;
+                
+                // Пробуем получить время из встроенного video
+                if (player.video && player.video.currentTime) {
+                    return player.video.currentTime;
+                }
+                
+                // Пробуем получить время напрямую из плеера
+                if (player.currentTime !== undefined && player.currentTime > 0) {
+                    return player.currentTime;
+                }
+                
+                // Для внешних плееров Lampa может хранить время в других свойствах
+                if (player.time !== undefined && player.time > 0) {
+                    return player.time;
+                }
+            }
+            
+            // Способ 3: Для внешних плееров на Android
+            // Lampa обновляет file_view при возврате из внешнего плеера
+            // В этом случае возвращаем null, чтобы использовать file_view
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+    
+    /**
+     * Проверка, используется ли внешний плеер
+     */
+    function isExternalPlayer() {
+        try {
+            // Если нет video элемента, вероятно используется внешний плеер
+            const video = document.querySelector('video');
+            if (!video) {
+                return true;
+            }
+            
+            // Проверяем через Lampa.Player
+            if (window.Lampa && window.Lampa.Player) {
+                const player = window.Lampa.Player;
+                // Если есть флаг external или externalPlayer
+                if (player.external || player.externalPlayer) {
+                    return true;
+                }
+            }
+            
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
      * Сохранение прогресса на сервер
      */
     async function saveProgress(tmdbId, fileId) {
@@ -394,8 +461,46 @@
                 console.log('[Lampa Sync] No file_view found for file_id:', fileId);
                 return;
             }
-
+            
             const progress = fileView[fileId];
+            
+            let finalTime = progress.time || 0;
+            let finalPercent = progress.percent || 0;
+            
+            // Пробуем получить актуальное время из video элемента (только для встроенного плеера)
+            const usingExternalPlayer = isExternalPlayer();
+            if (!usingExternalPlayer) {
+                const playbackTime = getCurrentPlaybackTime();
+                
+                if (playbackTime !== null && playbackTime > 0) {
+                    // Используем время из video элемента, если оно больше
+                    if (playbackTime > finalTime) {
+                        finalTime = playbackTime;
+                        // Вычисляем процент, если есть duration
+                        if (progress.duration && progress.duration > 0) {
+                            finalPercent = Math.round((finalTime / progress.duration) * 100);
+                        } else if (progress.percent) {
+                            // Используем старый процент, если duration неизвестен
+                            finalPercent = progress.percent;
+                        }
+                        
+                        // Обновляем file_view с актуальным временем
+                        fileView[fileId].time = finalTime;
+                        fileView[fileId].percent = finalPercent;
+                        setStorage('file_view', fileView);
+                        
+                        console.log('[Lampa Sync] Updated time from video element:', {
+                            oldTime: progress.time,
+                            newTime: finalTime,
+                            percent: finalPercent
+                        });
+                    }
+                }
+            } else {
+                // Для внешних плееров используем время из file_view
+                // Lampa обновляет его при возврате из внешнего плеера
+                console.log('[Lampa Sync] Using external player, time from file_view:', finalTime);
+            }
             
             // Пропускаем если прогресс > REMOVE_AT_PERCENT
             if (progress.percent >= config.REMOVE_AT_PERCENT) {
@@ -425,8 +530,8 @@
                 
                 const payload = {
                     tmdb: tmdbId,
-                    time: progress.time || 0,
-                    percent: progress.percent || 0,
+                    time: finalTime,
+                    percent: finalPercent,
                     favorite: minimalFavorite,
                     file_id: fileId // Отправляем file_id для маппинга на сервере
                 };
@@ -439,13 +544,13 @@
 
             const payload = {
                 tmdb: tmdbId,
-                time: progress.time || 0,
-                percent: progress.percent || 0,
+                time: finalTime,
+                percent: finalPercent,
                 favorite: favorite,
                 file_id: fileId // Отправляем file_id для маппинга на сервере
             };
 
-            console.log('[Lampa Sync] Saving progress (favorite size:', favoriteSize, 'bytes, file_id:', fileId, ', tmdb:', tmdbId, ')');
+            console.log('[Lampa Sync] Saving progress (favorite size:', favoriteSize, 'bytes, file_id:', fileId, ', tmdb:', tmdbId, ', time:', finalTime, ', percent:', finalPercent, ')');
             
             const result = await apiRequest('/progress', 'POST', payload);
             console.log('[Lampa Sync] Progress saved:', result);
@@ -683,15 +788,52 @@
             }
             
             // Отслеживаем изменения времени в существующих file_view
+            // И обновляем время из video элемента для активного просмотра (если доступно)
             currentFileViewKeys.forEach(fileId => {
                 const currentProgress = currentFileView[fileId];
-                const currentTime = currentProgress?.time || 0;
-                const currentPercent = currentProgress?.percent || 0;
+                let currentTime = currentProgress?.time || 0;
+                let currentPercent = currentProgress?.percent || 0;
                 const lastTime = lastFileViewTime[fileId] || 0;
                 const lastPercent = lastFileViewTime[fileId + '_percent'] || 0;
                 
                 // Если это текущий просматриваемый файл
                 if (fileId === currentFileId && currentTmdbId) {
+                    const usingExternalPlayer = isExternalPlayer();
+                    
+                    if (!usingExternalPlayer) {
+                        // Для встроенного плеера получаем актуальное время из video
+                        const playbackTime = getCurrentPlaybackTime();
+                        
+                        // Если получили время из video элемента, обновляем file_view
+                        if (playbackTime !== null && playbackTime > 0) {
+                            const config = getConfig();
+                            if (playbackTime >= config.MIN_SEEK_TIME) {
+                                // Обновляем file_view с актуальным временем
+                                if (playbackTime > currentTime) {
+                                    currentTime = playbackTime;
+                                    // Вычисляем процент, если есть duration
+                                    if (currentProgress.duration && currentProgress.duration > 0) {
+                                        currentPercent = Math.round((currentTime / currentProgress.duration) * 100);
+                                    }
+                                    
+                                    // Обновляем localStorage
+                                    const fileView = getStorage('file_view', {});
+                                    fileView[fileId].time = currentTime;
+                                    fileView[fileId].percent = currentPercent;
+                                    setStorage('file_view', fileView);
+                                    
+                                    // Обновляем текущий объект для дальнейшей обработки
+                                    currentFileView[fileId].time = currentTime;
+                                    currentFileView[fileId].percent = currentPercent;
+                                }
+                            }
+                        }
+                    } else {
+                        // Для внешних плееров полагаемся на обновления file_view от Lampa
+                        // Lampa обновляет file_view при возврате из внешнего плеера
+                        // Просто используем время из file_view как есть
+                    }
+                    
                     // Если время изменилось - это активный просмотр
                     if (currentTime !== lastTime && currentTime > 0) {
                         const config = getConfig();
@@ -857,14 +999,35 @@
                 const config = getConfig();
                 const fileView = getStorage('file_view', {});
                 if (fileView[currentFileId]) {
+                    let currentProgress = fileView[currentFileId].time || 0;
+                    
+                    // Получаем актуальное время из video элемента (только для встроенного плеера)
+                    const usingExternalPlayer = isExternalPlayer();
+                    if (!usingExternalPlayer) {
+                        const playbackTime = getCurrentPlaybackTime();
+                        
+                        // Если получили время из video, используем его
+                        if (playbackTime !== null && playbackTime > currentProgress) {
+                            currentProgress = playbackTime;
+                            // Обновляем file_view
+                            fileView[currentFileId].time = currentProgress;
+                            if (fileView[currentFileId].duration && fileView[currentFileId].duration > 0) {
+                                fileView[currentFileId].percent = Math.round((currentProgress / fileView[currentFileId].duration) * 100);
+                            }
+                            setStorage('file_view', fileView);
+                        }
+                    } else {
+                        // Для внешних плееров используем время из file_view
+                        // Lampa обновляет его при возврате из внешнего плеера
+                    }
+                    
                     // Сохраняем только если есть активный просмотр
                     const progress = fileView[currentFileId];
-                    if (progress && progress.time > config.MIN_SEEK_TIME) {
+                    if (progress && currentProgress > config.MIN_SEEK_TIME) {
                         // Сохраняем только если прошло более 30 секунд с последнего сохранения
                         // И время изменилось с момента последнего сохранения
                         const timeSinceLastSave = Date.now() - lastSavedTime;
                         const lastSavedProgress = lastFileViewTime[currentFileId] || 0;
-                        const currentProgress = progress.time || 0;
                         
                         if (timeSinceLastSave > 30000 && currentProgress !== lastSavedProgress) {
                             console.log('[Lampa Sync] Periodic auto-save:', {
