@@ -1809,96 +1809,135 @@
                 }
             }
             
+            // КРИТИЧНО: Перехватываем чтение значений через Lampa.Storage
+            // Если Lampa пытается прочитать значение и использует его как ключ, перехватываем это
+            try {
+                if (Lampa.Storage && Lampa.Storage.get) {
+                    const originalGet = Lampa.Storage.get;
+                    Lampa.Storage.get = function(key) {
+                        // Если ключ - это URL, возвращаем undefined
+                        if (key && (key.startsWith('http://') || key.startsWith('https://'))) {
+                            console.warn('[Lampa Sync] Prevented reading URL as key:', key);
+                            return undefined;
+                        }
+                        
+                        // Если читаем наши параметры, убеждаемся, что значение правильное
+                        if (key === 'lampa_sync_server_url' || key === 'lampa_sync_password') {
+                            const value = originalGet.apply(this, arguments);
+                            // Если значение - не строка, возвращаем значение по умолчанию
+                            if (key === 'lampa_sync_server_url' && (typeof value !== 'string' || !value)) {
+                                return 'http://localhost:3000';
+                            }
+                            if (key === 'lampa_sync_password' && typeof value !== 'string') {
+                                return '';
+                            }
+                            return value;
+                        }
+                        
+                        return originalGet.apply(this, arguments);
+                    };
+                    console.log('[Lampa Sync] Storage.get intercepted');
+                }
+            } catch (e) {
+                console.warn('[Lampa Sync] Could not intercept Storage.get:', e);
+            }
+            
+            // Также перехватываем через MutationObserver для очистки перед рендерингом
+            try {
+                const settingsObserver = new MutationObserver(function(mutations) {
+                    const settingsContainer = document.querySelector('.settings');
+                    if (settingsContainer && settingsContainer.style.display !== 'none') {
+                        try {
+                            // Быстрая очистка всех URL-ключей
+                            const allKeys = Object.keys(localStorage);
+                            allKeys.forEach(key => {
+                                if (key.startsWith('http://') || key.startsWith('https://')) {
+                                    localStorage.removeItem(key);
+                                }
+                            });
+                            // Устанавливаем правильные значения
+                            localStorage.setItem('lampa_sync_server_url', 'http://localhost:3000');
+                            localStorage.setItem('lampa_sync_password', '');
+                            if (Lampa.Storage && Lampa.Storage.set) {
+                                Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                                Lampa.Storage.set('lampa_sync_password', '');
+                            }
+                        } catch (e) {
+                            // Игнорируем ошибки
+                        }
+                    }
+                });
+                
+                settingsObserver.observe(document.body, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ['style', 'class']
+                });
+                
+                console.log('[Lampa Sync] Settings observer initialized');
+            } catch (e) {
+                console.warn('[Lampa Sync] Could not initialize settings observer:', e);
+            }
+            
             // Слушаем открытие настроек
             if (Lampa.Settings && Lampa.Settings.listener) {
                 Lampa.Settings.listener.follow('open', function(e) {
+                    // КРИТИЧНО: Очищаем ДО проверки имени, чтобы предотвратить ошибку
+                    // даже если настройки открываются не для нашего плагина
+                    try {
+                        // Очищаем все ключи, которые являются URL
+                        const allKeys = Object.keys(localStorage);
+                        let cleanedCount = 0;
+                        allKeys.forEach(key => {
+                            if (key.startsWith('http://') || key.startsWith('https://')) {
+                                console.warn('[Lampa Sync] Removing invalid key before settings open:', key);
+                                localStorage.removeItem(key);
+                                cleanedCount++;
+                                if (Lampa.Storage && Lampa.Storage.remove) {
+                                    try {
+                                        Lampa.Storage.remove(key);
+                                    } catch (e) {
+                                        // Игнорируем
+                                    }
+                                }
+                            }
+                        });
+                        
+                        if (cleanedCount > 0) {
+                            console.log('[Lampa Sync] Cleaned', cleanedCount, 'invalid keys before settings open');
+                        }
+                        
+                        // Принудительно устанавливаем правильные значения
+                        const defaultUrl = 'http://localhost:3000';
+                        const defaultPassword = '';
+                        
+                        // Удаляем старые значения
+                        try {
+                            localStorage.removeItem('lampa_sync_server_url');
+                            localStorage.removeItem('lampa_sync_password');
+                            if (Lampa.Storage && Lampa.Storage.remove) {
+                                Lampa.Storage.remove('lampa_sync_server_url');
+                                Lampa.Storage.remove('lampa_sync_password');
+                            }
+                        } catch (e) {
+                            // Игнорируем
+                        }
+                        
+                        // Устанавливаем правильные значения
+                        localStorage.setItem('lampa_sync_server_url', defaultUrl);
+                        localStorage.setItem('lampa_sync_password', defaultPassword);
+                        if (Lampa.Storage && Lampa.Storage.set) {
+                            Lampa.Storage.set('lampa_sync_server_url', defaultUrl);
+                            Lampa.Storage.set('lampa_sync_password', defaultPassword);
+                        }
+                    } catch (e) {
+                        console.error('[Lampa Sync] Error cleaning before settings open:', e);
+                    }
+                    
                     if (e.name == 'lampa_sync') {
                         // Настройки открыты
                         console.log('[Lampa Sync] Settings opened');
-                        
-                        // КРИТИЧНО: Агрессивная очистка ВСЕХ некорректных значений ПЕРЕД открытием
-                        // Это должно предотвратить ошибку "Cannot read properties of undefined"
-                        try {
-                            // Очищаем все ключи, которые являются URL
-                            const allKeys = Object.keys(localStorage);
-                            let cleanedCount = 0;
-                            allKeys.forEach(key => {
-                                if (key.startsWith('http://') || key.startsWith('https://')) {
-                                    console.warn('[Lampa Sync] Removing invalid key before settings open:', key);
-                                    localStorage.removeItem(key);
-                                    cleanedCount++;
-                                    if (Lampa.Storage && Lampa.Storage.remove) {
-                                        try {
-                                            Lampa.Storage.remove(key);
-                                        } catch (e) {
-                                            // Игнорируем
-                                        }
-                                    }
-                                }
-                            });
-                            
-                            if (cleanedCount > 0) {
-                                console.log('[Lampa Sync] Cleaned', cleanedCount, 'invalid keys before settings open');
-                            }
-                            
-                            // Принудительно устанавливаем правильные значения
-                            // Сначала удаляем, потом создаём заново
-                            const defaultUrl = 'http://localhost:3000';
-                            const defaultPassword = '';
-                            
-                            // Удаляем через оба способа
-                            try {
-                                if (Lampa.Storage && Lampa.Storage.remove) {
-                                    Lampa.Storage.remove('lampa_sync_server_url');
-                                    Lampa.Storage.remove('lampa_sync_password');
-                                }
-                            } catch (e) {
-                                // Игнорируем
-                            }
-                            
-                            try {
-                                localStorage.removeItem('lampa_sync_server_url');
-                                localStorage.removeItem('lampa_sync_password');
-                            } catch (e) {
-                                // Игнорируем
-                            }
-                            
-                            // Устанавливаем правильные значения
-                            // Сначала через localStorage (более надёжно)
-                            localStorage.setItem('lampa_sync_server_url', defaultUrl);
-                            localStorage.setItem('lampa_sync_password', defaultPassword);
-                            
-                            // Потом через Lampa.Storage (если доступен)
-                            if (Lampa.Storage && Lampa.Storage.set) {
-                                Lampa.Storage.set('lampa_sync_server_url', defaultUrl);
-                                Lampa.Storage.set('lampa_sync_password', defaultPassword);
-                            }
-                            
-                            // Проверяем, что значения установлены правильно
-                            const checkUrl = localStorage.getItem('lampa_sync_server_url');
-                            const checkPassword = localStorage.getItem('lampa_sync_password');
-                            
-                            if (checkUrl !== defaultUrl || checkPassword !== defaultPassword) {
-                                console.warn('[Lampa Sync] Values not set correctly, retrying...');
-                                // Повторная попытка
-                                localStorage.setItem('lampa_sync_server_url', defaultUrl);
-                                localStorage.setItem('lampa_sync_password', defaultPassword);
-                            }
-                            
-                            console.log('[Lampa Sync] Values reset before settings open:', {
-                                url: checkUrl,
-                                password: checkPassword ? '***' : '(empty)'
-                            });
-                        } catch (e) {
-                            console.error('[Lampa Sync] Error cleaning before settings open:', e);
-                            // В случае ошибки пробуем хотя бы установить значения по умолчанию
-                            try {
-                                localStorage.setItem('lampa_sync_server_url', 'http://localhost:3000');
-                                localStorage.setItem('lampa_sync_password', '');
-                            } catch (e2) {
-                                console.error('[Lampa Sync] Failed to set default values:', e2);
-                            }
-                        }
                         
                         // Показываем device_id в настройках для отладки
                         setTimeout(() => {
