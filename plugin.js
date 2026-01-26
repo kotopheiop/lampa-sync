@@ -92,6 +92,65 @@
         // Максимальное время ожидания file_view (мс)
         FILE_VIEW_TIMEOUT: 10000
     };
+    
+    // ==================== ID УСТРОЙСТВА ====================
+    
+    /**
+     * Генерация уникального ID устройства
+     */
+    function generateDeviceId() {
+        // Генерируем уникальный ID на основе timestamp и случайных чисел
+        const timestamp = Date.now().toString(36);
+        const randomPart = Math.random().toString(36).substring(2, 15);
+        const randomPart2 = Math.random().toString(36).substring(2, 15);
+        return `device_${timestamp}_${randomPart}${randomPart2}`;
+    }
+    
+    /**
+     * Получение или создание ID устройства
+     */
+    function getDeviceId() {
+        try {
+            let deviceId = null;
+            
+            // Пробуем получить из Lampa.Storage
+            if (window.Lampa && window.Lampa.Storage) {
+                deviceId = Lampa.Storage.get('lampa_sync_device_id');
+            }
+            
+            // Если нет, пробуем из localStorage
+            if (!deviceId) {
+                try {
+                    deviceId = localStorage.getItem('lampa_sync_device_id');
+                } catch (e) {
+                    // Игнорируем ошибки
+                }
+            }
+            
+            // Если всё ещё нет, создаём новый
+            if (!deviceId) {
+                deviceId = generateDeviceId();
+                console.log('[Lampa Sync] Generated new device ID:', deviceId);
+                
+                // Сохраняем
+                if (window.Lampa && window.Lampa.Storage) {
+                    Lampa.Storage.set('lampa_sync_device_id', deviceId);
+                } else {
+                    try {
+                        localStorage.setItem('lampa_sync_device_id', deviceId);
+                    } catch (e) {
+                        console.error('[Lampa Sync] Error saving device ID:', e);
+                    }
+                }
+            }
+            
+            return deviceId;
+        } catch (e) {
+            console.error('[Lampa Sync] Error getting device ID:', e);
+            // В случае ошибки возвращаем временный ID
+            return generateDeviceId();
+        }
+    }
 
     // ==================== КОНФИГУРАЦИЯ ====================
     
@@ -272,6 +331,10 @@
                 if (response.status === 401) {
                     throw new Error('Unauthorized: Check SYNC_PASSWORD in settings');
                 }
+                if (response.status === 404) {
+                    // 404 - это нормально, просто прогресса нет на сервере
+                    return null;
+                }
                 if (response.status === 413) {
                     throw new Error('Request too large (413): The favorite object is too big. Try reducing the size or contact server administrator.');
                 }
@@ -343,12 +406,25 @@
      */
     async function loadProgress(tmdbId) {
         try {
+            // КРИТИЧНО: Проверяем, что tmdbId соответствует текущему открытому фильму
+            const urlTmdbId = getTmdbIdFromUrl();
+            if (urlTmdbId && parseInt(urlTmdbId) !== parseInt(tmdbId)) {
+                console.log('[Lampa Sync] TMDB ID mismatch - requested:', tmdbId, 'current:', urlTmdbId, '- skipping load');
+                return null;
+            }
+            
             console.log('[Lampa Sync] Loading progress for TMDB:', tmdbId);
             
             const data = await apiRequest(`/progress?tmdb=${tmdbId}`);
             
             if (!data) {
-                console.log('[Lampa Sync] No progress found on server');
+                console.log('[Lampa Sync] No progress found on server for TMDB:', tmdbId);
+                return null;
+            }
+            
+            // Дополнительная проверка: убеждаемся, что данные соответствуют запрошенному tmdbId
+            if (data.tmdb && parseInt(data.tmdb) !== parseInt(tmdbId)) {
+                console.warn('[Lampa Sync] Progress data mismatch - requested:', tmdbId, 'received:', data.tmdb);
                 return null;
             }
 
@@ -390,7 +466,23 @@
                 }
             }
             
+            // КРИТИЧНО: Проверяем, что fileId соответствует текущему открытому фильму
+            const urlTmdbIdCheck = getTmdbIdFromUrl();
+            if (urlTmdbIdCheck && parseInt(urlTmdbIdCheck) !== parseInt(tmdbId)) {
+                console.warn('[Lampa Sync] TMDB ID mismatch when applying progress - requested:', tmdbId, 'current:', urlTmdbIdCheck, '- skipping apply');
+                return data; // Возвращаем данные, но не применяем
+            }
+            
             if (fileId && data.time !== undefined && data.percent !== undefined) {
+                // Дополнительная проверка: убеждаемся, что fileId соответствует текущему фильму
+                const currentFileIdCheck = getCurrentFileId();
+                if (currentFileIdCheck && currentFileIdCheck !== fileId && urlTmdbIdCheck) {
+                    // Если текущий fileId отличается, но tmdbId совпадает, используем текущий fileId
+                    // Это может быть, если файл был переименован или изменён
+                    console.log('[Lampa Sync] fileId mismatch, using current fileId:', currentFileIdCheck, 'instead of:', fileId);
+                    fileId = currentFileIdCheck;
+                }
+                
                 const fileView = getStorage('file_view', {});
                 
                 if (fileView[fileId]) {
@@ -399,41 +491,53 @@
                         const oldTime = fileView[fileId].time || 0;
                         const oldPercent = fileView[fileId].percent || 0;
                         
-                        fileView[fileId].time = data.time;
-                        fileView[fileId].percent = data.percent;
-                        setStorage('file_view', fileView);
-                        console.log('[Lampa Sync] ✅ Progress applied to file_view[' + fileId + ']:', {
-                            oldTime: oldTime,
-                            newTime: data.time,
-                            oldPercent: oldPercent,
-                            newPercent: data.percent
-                        });
-                        
-                        // Обновляем lastFileViewTime для отслеживания
-                        lastFileViewTime[fileId] = data.time;
-                        lastFileViewTime[fileId + '_percent'] = data.percent;
-                        lastFileViewTime[fileId + '_timestamp'] = Date.now();
-                        
-                        // Обновляем UI после изменения прогресса
-                        updateUIAfterProgressChange(fileId, tmdbId);
+                        // Обновляем только если новый прогресс больше старого
+                        if (data.time > oldTime || (data.time === oldTime && data.percent > oldPercent)) {
+                            fileView[fileId].time = data.time;
+                            fileView[fileId].percent = data.percent;
+                            setStorage('file_view', fileView);
+                            console.log('[Lampa Sync] ✅ Progress applied to file_view[' + fileId + ']:', {
+                                oldTime: oldTime,
+                                newTime: data.time,
+                                oldPercent: oldPercent,
+                                newPercent: data.percent
+                            });
+                            
+                            // Обновляем lastFileViewTime для отслеживания
+                            lastFileViewTime[fileId] = data.time;
+                            lastFileViewTime[fileId + '_percent'] = data.percent;
+                            lastFileViewTime[fileId + '_timestamp'] = Date.now();
+                            
+                            // Обновляем UI после изменения прогресса (только если это текущий фильм)
+                            if (urlTmdbIdCheck && parseInt(urlTmdbIdCheck) === parseInt(tmdbId)) {
+                                updateUIAfterProgressChange(fileId, tmdbId);
+                            }
+                        } else {
+                            console.log('[Lampa Sync] Progress not applied - current progress is newer or equal');
+                        }
                     }
                 } else {
-                    console.warn('[Lampa Sync] file_view[' + fileId + '] not found, creating entry');
-                    fileView[fileId] = {
-                        time: data.time >= config.MIN_SEEK_TIME ? data.time : 0,
-                        percent: data.percent || 0,
-                        duration: 0,
-                        profile: 'default'
-                    };
-                    setStorage('file_view', fileView);
-                    
-                    // Обновляем lastFileViewTime
-                    lastFileViewTime[fileId] = fileView[fileId].time;
-                    lastFileViewTime[fileId + '_percent'] = fileView[fileId].percent;
-                    lastFileViewTime[fileId + '_timestamp'] = Date.now();
-                    
-                    // Обновляем UI после создания новой записи
-                    updateUIAfterProgressChange(fileId, tmdbId);
+                    // Создаём новую запись только если это текущий открытый фильм
+                    if (urlTmdbIdCheck && parseInt(urlTmdbIdCheck) === parseInt(tmdbId)) {
+                        console.warn('[Lampa Sync] file_view[' + fileId + '] not found, creating entry');
+                        fileView[fileId] = {
+                            time: data.time >= config.MIN_SEEK_TIME ? data.time : 0,
+                            percent: data.percent || 0,
+                            duration: 0,
+                            profile: 'default'
+                        };
+                        setStorage('file_view', fileView);
+                        
+                        // Обновляем lastFileViewTime
+                        lastFileViewTime[fileId] = fileView[fileId].time;
+                        lastFileViewTime[fileId + '_percent'] = fileView[fileId].percent;
+                        lastFileViewTime[fileId + '_timestamp'] = Date.now();
+                        
+                        // Обновляем UI после создания новой записи
+                        updateUIAfterProgressChange(fileId, tmdbId);
+                    } else {
+                        console.log('[Lampa Sync] Skipping file_view creation - not current movie');
+                    }
                 }
             } else {
                 console.warn('[Lampa Sync] Cannot find file_id for tmdb:', tmdbId, '- progress not applied to file_view');
@@ -596,19 +700,25 @@
                         );
                         
                         fullPageProgress.forEach(el => {
-                            // Обновляем элементы, которые показывают время или процент
+                            // Обновляем только элементы, которые явно показывают процент (не время!)
                             const text = el.textContent || '';
-                            if (text.match(/\d+%/) || text.match(/\d+\s*мин/) || text.match(/\d+\s*:\d+/)) {
-                                // Обновляем текст прогресса
-                                if (progress.percent > 0) {
+                            const className = el.className || '';
+                            
+                            // Обновляем только если элемент явно показывает процент (содержит % или класс progress/percent)
+                            if (text.match(/\d+%/) || className.includes('percent') || className.includes('progress')) {
+                                // Обновляем текст прогресса только если это элемент процента
+                                if (progress.percent > 0 && (text.includes('%') || className.includes('percent'))) {
                                     el.textContent = progress.percent + '%';
                                 }
                             }
                             
-                            // Обновляем прогресс-бары
-                            if (el.style) {
+                            // Обновляем прогресс-бары (ширину)
+                            if (el.style && (className.includes('progress') || className.includes('bar'))) {
                                 el.style.width = progress.percent + '%';
                             }
+                            
+                            // НЕ обновляем элементы, которые показывают время (содержат : или мин)
+                            // Это предотвращает замену времени на процент
                         });
                         
                         // Обновляем кнопку "Продолжить просмотр", если она есть
@@ -817,29 +927,37 @@
                     thrown: favorite.thrown || []
                 };
                 
+                // Получаем ID устройства
+                const deviceId = getDeviceId();
+                
                 const payload = {
                     tmdb: tmdbId,
                     time: finalTime,
                     percent: finalPercent,
                     favorite: minimalFavorite,
-                    file_id: fileId // Отправляем file_id для маппинга на сервере
+                    file_id: fileId, // Отправляем file_id для маппинга на сервере
+                    device_id: deviceId // Отправляем device_id для различения устройств
                 };
                 
-                console.log('[Lampa Sync] Saving progress with minimal favorite (size:', JSON.stringify(minimalFavorite).length, 'bytes, file_id:', fileId, ', tmdb:', tmdbId, ')');
+                console.log('[Lampa Sync] Saving progress with minimal favorite (size:', JSON.stringify(minimalFavorite).length, 'bytes, file_id:', fileId, ', tmdb:', tmdbId, ', device_id:', deviceId.substring(0, 20) + '...', ')');
                 const result = await apiRequest('/progress', 'POST', payload);
                 console.log('[Lampa Sync] Progress saved:', result);
                 return result;
             }
 
+            // Получаем ID устройства
+            const deviceId = getDeviceId();
+            
             const payload = {
                 tmdb: tmdbId,
                 time: finalTime,
                 percent: finalPercent,
                 favorite: favorite,
-                file_id: fileId // Отправляем file_id для маппинга на сервере
+                file_id: fileId, // Отправляем file_id для маппинга на сервере
+                device_id: deviceId // Отправляем device_id для различения устройств
             };
 
-            console.log('[Lampa Sync] Saving progress (favorite size:', favoriteSize, 'bytes, file_id:', fileId, ', tmdb:', tmdbId, ', time:', finalTime, ', percent:', finalPercent, ')');
+            console.log('[Lampa Sync] Saving progress (favorite size:', favoriteSize, 'bytes, file_id:', fileId, ', tmdb:', tmdbId, ', device_id:', deviceId.substring(0, 20) + '...', ', time:', finalTime, ', percent:', finalPercent, ')');
             
             const result = await apiRequest('/progress', 'POST', payload);
             console.log('[Lampa Sync] Progress saved:', result);
@@ -900,7 +1018,17 @@
         const tmdbId = getTmdbIdFromUrl();
         if (!tmdbId) {
             console.log('[Lampa Sync] No TMDB ID in URL, skipping sync');
+            // Сбрасываем текущие значения, если нет TMDB ID
+            currentTmdbId = null;
+            currentFileId = null;
             return;
+        }
+
+        // КРИТИЧНО: Если TMDB ID изменился, сбрасываем fileId
+        if (currentTmdbId && parseInt(currentTmdbId) !== parseInt(tmdbId)) {
+            console.log('[Lampa Sync] TMDB ID changed, resetting fileId:', currentTmdbId, '->', tmdbId);
+            currentFileId = null; // Сбрасываем fileId при смене фильма
+            pendingProgress = null; // Сбрасываем pending progress
         }
 
         currentTmdbId = tmdbId;
@@ -1307,40 +1435,34 @@
             // Если открыта карточка фильма (есть TMDB ID в URL)
             if (urlTmdbId) {
                 try {
-                    // Загружаем прогресс с сервера
+                    // Загружаем прогресс с сервера (loadProgress уже проверяет соответствие tmdbId)
                     const data = await loadProgress(urlTmdbId);
                     
+                    // loadProgress сам применяет прогресс, если он соответствует текущему фильму
+                    // Здесь мы только логируем результат
                     if (data && data.time !== undefined && data.percent !== undefined) {
-                        const fileId = getCurrentFileId();
-                        
-                        if (fileId) {
-                            const fileView = getStorage('file_view', {});
-                            const currentProgress = fileView[fileId];
-                            
-                            // Если прогресс с сервера новее (больше времени), обновляем
-                            if (currentProgress && data.time > currentProgress.time) {
-                                const config = getConfig();
-                                if (data.time >= config.MIN_SEEK_TIME) {
-                                    fileView[fileId].time = data.time;
-                                    fileView[fileId].percent = data.percent;
-                                    setStorage('file_view', fileView);
-                                    
-                                    // Обновляем UI
-                                    updateUIAfterProgressChange(fileId, urlTmdbId);
-                                    
-                                    console.log('[Lampa Sync] 🔄 Progress synced from server:', {
-                                        tmdb: urlTmdbId,
-                                        fileId: fileId,
-                                        time: data.time,
-                                        percent: data.percent
-                                    });
-                                }
+                        const currentUrlTmdbId = getTmdbIdFromUrl();
+                        // Дополнительная проверка: убеждаемся, что фильм не изменился
+                        if (currentUrlTmdbId && parseInt(currentUrlTmdbId) === parseInt(urlTmdbId)) {
+                            const fileId = getCurrentFileId();
+                            if (fileId) {
+                                console.log('[Lampa Sync] 🔄 Progress synced from server:', {
+                                    tmdb: urlTmdbId,
+                                    fileId: fileId,
+                                    time: data.time,
+                                    percent: data.percent
+                                });
                             }
                         }
                     }
                 } catch (e) {
                     // Игнорируем ошибки при периодической синхронизации
                     // (чтобы не засорять консоль, если сервер недоступен)
+                    // Но логируем только если это не 404 (404 - это нормально, просто нет прогресса)
+                    const errorMsg = e.message || String(e);
+                    if (!errorMsg.includes('404') && !errorMsg.includes('Not Found')) {
+                        // Логируем только не-404 ошибки
+                    }
                 }
             }
         }, 15000); // Каждые 15 секунд
@@ -1516,6 +1638,10 @@
                         <div class="settings-param__name">Пароль синхронизации</div>
                         <div class="settings-param__value"></div>
                     </div>
+                    <div class="settings-param" data-static="true" style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #444;">
+                        <div class="settings-param__name" style="color: #888; font-size: 12px;">ID устройства (для отладки)</div>
+                        <div class="settings-param__value" style="color: #aaa; font-size: 11px; word-break: break-all;" id="lampasync-device-id-display"></div>
+                    </div>
                 </div>
             `;
             
@@ -1634,6 +1760,20 @@
                     if (e.name == 'lampa_sync') {
                         // Настройки открыты
                         console.log('[Lampa Sync] Settings opened');
+                        
+                        // Показываем device_id в настройках для отладки
+                        try {
+                            const deviceIdDisplay = e.body?.find('#lampasync-device-id-display') || document.getElementById('lampasync-device-id-display');
+                            if (deviceIdDisplay && deviceIdDisplay.length !== undefined) {
+                                // jQuery объект
+                                deviceIdDisplay.text(getDeviceId());
+                            } else if (deviceIdDisplay) {
+                                // DOM элемент
+                                deviceIdDisplay.textContent = getDeviceId();
+                            }
+                        } catch (err) {
+                            // Игнорируем ошибки
+                        }
                         
                         // КРИТИЧНО: Убеждаемся, что значения в Storage правильные ПЕРЕД тем, как Lampa их прочитает
                         try {
@@ -2096,13 +2236,18 @@
 
     // Экспортируем функции для ручного управления (опционально)
     window.LampaSync = {
-        loadProgress,
-        saveProgress,
-        getTmdbIdFromUrl,
-        getCurrentFileId,
-        getConfig,
+        loadProgress: loadProgress,
+        saveProgress: saveProgress,
+        getTmdbIdFromUrl: getTmdbIdFromUrl,
+        getCurrentFileId: getCurrentFileId,
+        getConfig: getConfig,
+        getDeviceId: getDeviceId,
         showSettings: showSettingsModal
     };
+    
+    // Логируем для отладки
+    console.log('[Lampa Sync] Exported functions:', Object.keys(window.LampaSync));
+    console.log('[Lampa Sync] Device ID:', getDeviceId());
     
     // Показываем инструкцию и модальное окно при загрузке, если настройки не заданы
     setTimeout(() => {
