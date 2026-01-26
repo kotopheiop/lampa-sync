@@ -319,13 +319,38 @@
                 if (fileView[fileId]) {
                     // Обновляем только если время > MIN_SEEK_TIME
                     if (data.time >= config.MIN_SEEK_TIME) {
+                        const oldTime = fileView[fileId].time || 0;
+                        const oldPercent = fileView[fileId].percent || 0;
+                        
                         fileView[fileId].time = data.time;
                         fileView[fileId].percent = data.percent;
                         setStorage('file_view', fileView);
-                        console.log('[Lampa Sync] file_view[' + fileId + '] updated: time=' + data.time + ', percent=' + data.percent);
+                        console.log('[Lampa Sync] ✅ Progress applied to file_view[' + fileId + ']:', {
+                            oldTime: oldTime,
+                            newTime: data.time,
+                            oldPercent: oldPercent,
+                            newPercent: data.percent
+                        });
+                        
+                        // Обновляем lastFileViewTime для отслеживания
+                        lastFileViewTime[fileId] = data.time;
+                        lastFileViewTime[fileId + '_percent'] = data.percent;
+                        lastFileViewTime[fileId + '_timestamp'] = Date.now();
                     }
                 } else {
-                    console.warn('[Lampa Sync] file_view[' + fileId + '] not found, cannot update progress');
+                    console.warn('[Lampa Sync] file_view[' + fileId + '] not found, creating entry');
+                    fileView[fileId] = {
+                        time: data.time >= config.MIN_SEEK_TIME ? data.time : 0,
+                        percent: data.percent || 0,
+                        duration: 0,
+                        profile: 'default'
+                    };
+                    setStorage('file_view', fileView);
+                    
+                    // Обновляем lastFileViewTime
+                    lastFileViewTime[fileId] = fileView[fileId].time;
+                    lastFileViewTime[fileId + '_percent'] = fileView[fileId].percent;
+                    lastFileViewTime[fileId + '_timestamp'] = Date.now();
                 }
             } else {
                 console.warn('[Lampa Sync] Cannot find file_id for tmdb:', tmdbId, '- progress not applied to file_view');
@@ -657,25 +682,57 @@
                 handleStart();
             }
             
-            // Отслеживаем изменения времени в существующих file_view (пауза/остановка)
+            // Отслеживаем изменения времени в существующих file_view
             currentFileViewKeys.forEach(fileId => {
-                const currentTime = currentFileView[fileId]?.time || 0;
+                const currentProgress = currentFileView[fileId];
+                const currentTime = currentProgress?.time || 0;
+                const currentPercent = currentProgress?.percent || 0;
                 const lastTime = lastFileViewTime[fileId] || 0;
+                const lastPercent = lastFileViewTime[fileId + '_percent'] || 0;
                 
-                // Если время не изменилось, но было > 0, возможно пауза
-                if (currentTime > 0 && currentTime === lastTime && lastTime > 0) {
-                    // Проверяем, не изменилось ли время последний раз более 3 секунд назад
-                    // Это может означать паузу
-                    const timeSinceLastChange = Date.now() - (lastFileViewTime[fileId + '_timestamp'] || 0);
-                    if (timeSinceLastChange > 3000 && timeSinceLastChange < 10000) {
-                        console.log('[Lampa Sync] Possible pause detected');
-                        handleSave();
+                // Если это текущий просматриваемый файл
+                if (fileId === currentFileId && currentTmdbId) {
+                    // Если время изменилось - это активный просмотр
+                    if (currentTime !== lastTime && currentTime > 0) {
+                        const config = getConfig();
+                        // Сохраняем только если время больше минимального для seek
+                        if (currentTime >= config.MIN_SEEK_TIME) {
+                            // Дебаунс: сохраняем через 5 секунд после последнего изменения
+                            if (syncTimeout) {
+                                clearTimeout(syncTimeout);
+                            }
+                            syncTimeout = setTimeout(() => {
+                                if (currentTmdbId && currentFileId) {
+                                    console.log('[Lampa Sync] Auto-saving progress:', {
+                                        tmdb: currentTmdbId,
+                                        fileId: currentFileId,
+                                        time: currentTime,
+                                        percent: currentPercent
+                                    });
+                                    saveProgress(currentTmdbId, currentFileId).catch(e => {
+                                        console.error('[Lampa Sync] Auto-save error:', e);
+                                    });
+                                    lastSavedTime = Date.now();
+                                }
+                            }, 5000); // Сохраняем через 5 секунд после изменения
+                        }
+                    }
+                    
+                    // Если время не изменилось, но было > 0, возможно пауза
+                    if (currentTime > 0 && currentTime === lastTime && lastTime > 0) {
+                        const timeSinceLastChange = Date.now() - (lastFileViewTime[fileId + '_timestamp'] || 0);
+                        // Если время не менялось более 3 секунд - это пауза
+                        if (timeSinceLastChange > 3000) {
+                            console.log('[Lampa Sync] Pause detected (time unchanged for', Math.round(timeSinceLastChange/1000), 'seconds)');
+                            handleSave();
+                        }
                     }
                 }
                 
-                // Сохраняем текущее время
-                if (currentTime !== lastTime) {
+                // Сохраняем текущее время и процент
+                if (currentTime !== lastTime || currentPercent !== lastPercent) {
                     lastFileViewTime[fileId] = currentTime;
+                    lastFileViewTime[fileId + '_percent'] = currentPercent;
                     lastFileViewTime[fileId + '_timestamp'] = Date.now();
                 }
             });
@@ -713,11 +770,37 @@
         setInterval(() => {
             const tmdbId = getTmdbIdFromUrl();
             if (tmdbId && tmdbId !== lastTmdbId) {
-                console.log('[Lampa Sync] TMDB ID detected in URL (card opened):', tmdbId);
+                console.log('[Lampa Sync] 🔄 TMDB ID detected in URL (card opened):', tmdbId);
                 lastTmdbId = tmdbId;
+                currentTmdbId = tmdbId; // Обновляем глобальную переменную
+                
+                // Пробуем найти file_id сразу
+                let fileId = getCurrentFileId();
+                if (!fileId) {
+                    // Пробуем найти по индексу в favorite.card
+                    const favorite = getStorage('favorite', {});
+                    const cardArray = favorite.card || [];
+                    const tmdbIndex = cardArray.indexOf(tmdbId);
+                    
+                    if (tmdbIndex >= 0) {
+                        const fileView = getStorage('file_view', {});
+                        const fileViewKeys = Object.keys(fileView);
+                        if (fileViewKeys.length > tmdbIndex) {
+                            fileId = fileViewKeys[tmdbIndex];
+                            console.log('[Lampa Sync] Found file_id by index on card open:', fileId);
+                        }
+                    }
+                }
+                
+                if (fileId) {
+                    currentFileId = fileId;
+                }
+                
                 // Загружаем прогресс сразу, даже если плеер не запущен
                 // Это позволит синхронизировать favorite и подготовить file_view
-                loadProgress(tmdbId).catch(e => {
+                loadProgress(tmdbId).then(() => {
+                    console.log('[Lampa Sync] ✅ Progress loaded on card open');
+                }).catch(e => {
                     console.error('[Lampa Sync] Error loading progress on card open:', e);
                 });
             }
@@ -778,11 +861,23 @@
                     const progress = fileView[currentFileId];
                     if (progress && progress.time > config.MIN_SEEK_TIME) {
                         // Сохраняем только если прошло более 30 секунд с последнего сохранения
-                        if (Date.now() - lastSavedTime > 30000) {
+                        // И время изменилось с момента последнего сохранения
+                        const timeSinceLastSave = Date.now() - lastSavedTime;
+                        const lastSavedProgress = lastFileViewTime[currentFileId] || 0;
+                        const currentProgress = progress.time || 0;
+                        
+                        if (timeSinceLastSave > 30000 && currentProgress !== lastSavedProgress) {
+                            console.log('[Lampa Sync] Periodic auto-save:', {
+                                tmdb: currentTmdbId,
+                                fileId: currentFileId,
+                                time: currentProgress,
+                                percent: progress.percent
+                            });
                             saveProgress(currentTmdbId, currentFileId).catch(e => {
-                                console.error('[Lampa Sync] Auto-save error:', e);
+                                console.error('[Lampa Sync] Periodic auto-save error:', e);
                             });
                             lastSavedTime = Date.now();
+                            lastFileViewTime[currentFileId] = currentProgress;
                         }
                     }
                 }
