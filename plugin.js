@@ -1586,20 +1586,8 @@
                         
                         // Lampa автоматически обрабатывает поля с data-type="input"
                         // Значения сохраняются через Lampa.Storage автоматически
-                        // Убеждаемся, что значения инициализированы правильно
-                        if (Lampa.Params && typeof Lampa.Params.update === 'function') {
-                            // Обновляем параметры, чтобы они правильно отобразились
-                            const body = e.body || $(document);
-                            const urlParam = body.find('[data-name="lampa_sync_server_url"]');
-                            const passwordParam = body.find('[data-name="lampa_sync_password"]');
-                            
-                            if (urlParam.length && Lampa.Params.update) {
-                                Lampa.Params.update(urlParam, [], body);
-                            }
-                            if (passwordParam.length && Lampa.Params.update) {
-                                Lampa.Params.update(passwordParam, [], body);
-                            }
-                        }
+                        // НЕ вызываем Lampa.Params.update() вручную - это вызывает ошибку
+                        // Lampa сам обновит параметры при открытии настроек
                     }
                 });
             }
@@ -1657,8 +1645,11 @@
                                     border-radius: 5px;
                                     color: #fff;
                                     font-size: 14px;
+                                    box-sizing: border-box;
                                 "
                                 placeholder="http://localhost:3000"
+                                autocomplete="off"
+                                spellcheck="false"
                             />
                             <small style="color: #888; font-size: 12px;">
                                 Адрес сервера для синхронизации прогресса
@@ -1679,8 +1670,11 @@
                                     border-radius: 5px;
                                     color: #fff;
                                     font-size: 14px;
+                                    box-sizing: border-box;
                                 "
                                 placeholder="Введите пароль"
+                                autocomplete="off"
+                                spellcheck="false"
                             />
                             <small style="color: #888; font-size: 12px;">
                                 Должен совпадать с SYNC_PASSWORD в .env сервера
@@ -1725,6 +1719,21 @@
             const cancelBtn = document.getElementById('lampasync-cancel');
             const urlInput = document.getElementById('lampasync-server-url');
             const passwordInput = document.getElementById('lampasync-password');
+            
+            // Убеждаемся, что поля редактируемы и фокусируем первое поле
+            if (urlInput) {
+                urlInput.readOnly = false;
+                urlInput.disabled = false;
+                setTimeout(() => {
+                    urlInput.focus();
+                    urlInput.select();
+                }, 100);
+            }
+            
+            if (passwordInput) {
+                passwordInput.readOnly = false;
+                passwordInput.disabled = false;
+            }
             
             // Обработчик сохранения
             saveBtn.addEventListener('click', () => {
