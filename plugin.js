@@ -38,8 +38,15 @@
         let password = '';
         
         if (window.Lampa && window.Lampa.Storage) {
-            serverUrl = Lampa.Storage.get('lampa_sync_server_url') || serverUrl;
-            password = Lampa.Storage.get('lampa_sync_password') || password;
+            // Используем field() для совместимости с Lampa.Params
+            if (typeof Lampa.Storage.field === 'function') {
+                serverUrl = Lampa.Storage.field('lampa_sync_server_url') || serverUrl;
+                password = Lampa.Storage.field('lampa_sync_password') || password;
+            } else {
+                // Fallback на get()
+                serverUrl = Lampa.Storage.get('lampa_sync_server_url') || serverUrl;
+                password = Lampa.Storage.get('lampa_sync_password') || password;
+            }
         } else {
             // Fallback на localStorage
             try {
@@ -51,6 +58,10 @@
                 console.warn('[Lampa Sync] Error reading config from localStorage:', e);
             }
         }
+        
+        // Убеждаемся, что значения - строки
+        serverUrl = String(serverUrl || 'http://localhost:3000');
+        password = String(password || '');
         
         return {
             SYNC_SERVER_URL: serverUrl,
@@ -1442,9 +1453,81 @@
                 </div>
             `;
             
+            // Убеждаемся, что значения в Storage - это строки, а не объекты
+            if (window.Lampa && window.Lampa.Storage) {
+                try {
+                    const currentUrl = Lampa.Storage.get('lampa_sync_server_url');
+                    const currentPassword = Lampa.Storage.get('lampa_sync_password');
+                    
+                    // Если значение - объект или массив, сбрасываем его
+                    if (currentUrl && (typeof currentUrl === 'object' || Array.isArray(currentUrl))) {
+                        console.warn('[Lampa Sync] Invalid URL value type, resetting');
+                        Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                    }
+                    
+                    if (currentPassword && (typeof currentPassword === 'object' || Array.isArray(currentPassword))) {
+                        console.warn('[Lampa Sync] Invalid password value type, resetting');
+                        Lampa.Storage.set('lampa_sync_password', '');
+                    }
+                } catch (e) {
+                    console.warn('[Lampa Sync] Error checking storage values:', e);
+                }
+            }
+            
             // Добавляем шаблон
             Lampa.Template.add('settings_lampa_sync', template);
             console.log('[Lampa Sync] ✅ Settings template added');
+            
+            // Инициализируем значения по умолчанию и очищаем некорректные значения
+            if (window.Lampa && window.Lampa.Storage) {
+                try {
+                    // Проверяем и очищаем некорректные значения
+                    const allStorage = Lampa.Storage.all();
+                    if (allStorage) {
+                        // Ищем значения, которые могут быть сохранены неправильно
+                        for (const key in allStorage) {
+                            // Если ключ - это URL (начинается с http), это ошибка
+                            if (key.startsWith('http://') || key.startsWith('https://')) {
+                                console.warn('[Lampa Sync] Found invalid storage key (URL):', key);
+                                // Удаляем некорректный ключ
+                                try {
+                                    Lampa.Storage.remove(key);
+                                } catch (e) {
+                                    // Игнорируем ошибки удаления
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Инициализируем правильные значения
+                    const currentUrl = Lampa.Storage.get('lampa_sync_server_url');
+                    const currentPassword = Lampa.Storage.get('lampa_sync_password');
+                    
+                    // Если значение - не строка, сбрасываем
+                    if (currentUrl && typeof currentUrl !== 'string') {
+                        console.warn('[Lampa Sync] Invalid URL value type, resetting');
+                        Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                    } else if (!currentUrl) {
+                        Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                    }
+                    
+                    if (currentPassword && typeof currentPassword !== 'string') {
+                        console.warn('[Lampa Sync] Invalid password value type, resetting');
+                        Lampa.Storage.set('lampa_sync_password', '');
+                    } else if (currentPassword === null || currentPassword === undefined) {
+                        Lampa.Storage.set('lampa_sync_password', '');
+                    }
+                } catch (e) {
+                    console.error('[Lampa Sync] Error initializing storage values:', e);
+                    // Устанавливаем значения по умолчанию в любом случае
+                    try {
+                        Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                        Lampa.Storage.set('lampa_sync_password', '');
+                    } catch (e2) {
+                        console.error('[Lampa Sync] Error setting default values:', e2);
+                    }
+                }
+            }
             
             // Слушаем открытие настроек
             if (Lampa.Settings && Lampa.Settings.listener) {
@@ -1455,6 +1538,20 @@
                         
                         // Lampa автоматически обрабатывает поля с data-type="input"
                         // Значения сохраняются через Lampa.Storage автоматически
+                        // Убеждаемся, что значения инициализированы правильно
+                        if (Lampa.Params && typeof Lampa.Params.update === 'function') {
+                            // Обновляем параметры, чтобы они правильно отобразились
+                            const body = e.body || $(document);
+                            const urlParam = body.find('[data-name="lampa_sync_server_url"]');
+                            const passwordParam = body.find('[data-name="lampa_sync_password"]');
+                            
+                            if (urlParam.length && Lampa.Params.update) {
+                                Lampa.Params.update(urlParam, [], body);
+                            }
+                            if (passwordParam.length && Lampa.Params.update) {
+                                Lampa.Params.update(passwordParam, [], body);
+                            }
+                        }
                     }
                 });
             }
