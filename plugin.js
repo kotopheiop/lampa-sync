@@ -805,6 +805,7 @@
     let currentFileId = null;
     let lastSavedTime = 0;
     let pendingProgress = null; // Сохраняем прогресс, если file_id ещё не найден
+    let lastFileViewTime = {}; // Отслеживание времени file_view для предотвращения дублирования
 
     /**
      * Обработчик события start
@@ -954,7 +955,11 @@
 
         // Отслеживаем изменения в localStorage для определения событий плеера
         let lastFileView = getStorage('file_view', {});
-        let lastFileViewTime = {};
+        // Используем глобальную переменную lastFileViewTime, объявленную выше
+        if (Object.keys(lastFileViewTime).length === 0) {
+            // Инициализируем только если пусто
+            lastFileViewTime = {};
+        }
         let lastUrl = window.location.href;
         let lastTmdbId = null;
         
@@ -1073,12 +1078,24 @@
                     }
                     
                     // Если время не изменилось, но было > 0, возможно пауза
+                    // Но сохраняем только один раз при обнаружении паузы, не постоянно
                     if (currentTime > 0 && currentTime === lastTime && lastTime > 0) {
                         const timeSinceLastChange = Date.now() - (lastFileViewTime[fileId + '_timestamp'] || 0);
+                        const pauseDetectedKey = fileId + '_pause_detected';
+                        const lastPauseDetected = lastFileViewTime[pauseDetectedKey] || 0;
+                        
                         // Если время не менялось более 3 секунд - это пауза
-                        if (timeSinceLastChange > 3000) {
+                        // Но сохраняем только если ещё не сохраняли для этой паузы
+                        if (timeSinceLastChange > 3000 && (Date.now() - lastPauseDetected) > 10000) {
                             console.log('[Lampa Sync] Pause detected (time unchanged for', Math.round(timeSinceLastChange/1000), 'seconds)');
+                            lastFileViewTime[pauseDetectedKey] = Date.now();
                             handleSave();
+                        }
+                    } else {
+                        // Если время изменилось, сбрасываем флаг паузы
+                        const pauseDetectedKey = fileId + '_pause_detected';
+                        if (lastFileViewTime[pauseDetectedKey]) {
+                            delete lastFileViewTime[pauseDetectedKey];
                         }
                     }
                 }
@@ -1363,7 +1380,179 @@
 
     // ==================== НАСТРОЙКИ LAMPA ====================
     
-    // Функция для добавления настроек
+    /**
+     * Создание модального окна для настроек
+     */
+    function showSettingsModal() {
+        try {
+            const config = getConfig();
+            
+            // Создаём HTML для модального окна
+            const modalHtml = `
+                <div class="lampasync-settings-modal" style="
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    background: rgba(0,0,0,0.8);
+                    z-index: 99999;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                ">
+                    <div style="
+                        background: #1a1a1a;
+                        padding: 30px;
+                        border-radius: 10px;
+                        max-width: 500px;
+                        width: 90%;
+                        color: #fff;
+                        font-family: Arial, sans-serif;
+                    ">
+                        <h2 style="margin-top: 0; color: #fff;">⚙️ Настройки синхронизации Lampa</h2>
+                        
+                        <div style="margin-bottom: 20px;">
+                            <label style="display: block; margin-bottom: 5px; color: #ccc;">
+                                URL сервера синхронизации:
+                            </label>
+                            <input type="text" id="lampasync-server-url" 
+                                value="${config.SYNC_SERVER_URL}" 
+                                style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    background: #2a2a2a;
+                                    border: 1px solid #444;
+                                    border-radius: 5px;
+                                    color: #fff;
+                                    font-size: 14px;
+                                "
+                                placeholder="http://localhost:3000"
+                            />
+                            <small style="color: #888; font-size: 12px;">
+                                Адрес сервера для синхронизации прогресса
+                            </small>
+                        </div>
+                        
+                        <div style="margin-bottom: 20px;">
+                            <label style="display: block; margin-bottom: 5px; color: #ccc;">
+                                Пароль синхронизации:
+                            </label>
+                            <input type="password" id="lampasync-password" 
+                                value="${config.SYNC_PASSWORD}" 
+                                style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    background: #2a2a2a;
+                                    border: 1px solid #444;
+                                    border-radius: 5px;
+                                    color: #fff;
+                                    font-size: 14px;
+                                "
+                                placeholder="Введите пароль"
+                            />
+                            <small style="color: #888; font-size: 12px;">
+                                Должен совпадать с SYNC_PASSWORD в .env сервера
+                            </small>
+                        </div>
+                        
+                        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                            <button id="lampasync-save" style="
+                                padding: 10px 20px;
+                                background: #4CAF50;
+                                border: none;
+                                border-radius: 5px;
+                                color: #fff;
+                                cursor: pointer;
+                                font-size: 14px;
+                            ">💾 Сохранить</button>
+                            <button id="lampasync-cancel" style="
+                                padding: 10px 20px;
+                                background: #666;
+                                border: none;
+                                border-radius: 5px;
+                                color: #fff;
+                                cursor: pointer;
+                                font-size: 14px;
+                            ">❌ Отмена</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Удаляем старое модальное окно, если есть
+            const oldModal = document.querySelector('.lampasync-settings-modal');
+            if (oldModal) {
+                oldModal.remove();
+            }
+            
+            // Добавляем модальное окно
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+            
+            const modal = document.querySelector('.lampasync-settings-modal');
+            const saveBtn = document.getElementById('lampasync-save');
+            const cancelBtn = document.getElementById('lampasync-cancel');
+            const urlInput = document.getElementById('lampasync-server-url');
+            const passwordInput = document.getElementById('lampasync-password');
+            
+            // Обработчик сохранения
+            saveBtn.addEventListener('click', () => {
+                const serverUrl = urlInput.value.trim();
+                const password = passwordInput.value.trim();
+                
+                if (!serverUrl) {
+                    alert('⚠️ Пожалуйста, укажите URL сервера');
+                    return;
+                }
+                
+                if (!password) {
+                    alert('⚠️ Пожалуйста, укажите пароль');
+                    return;
+                }
+                
+                // Сохраняем настройки
+                if (window.Lampa && window.Lampa.Storage) {
+                    Lampa.Storage.set('lampa_sync_server_url', serverUrl);
+                    Lampa.Storage.set('lampa_sync_password', password);
+                } else {
+                    localStorage.setItem('lampa_sync_server_url', serverUrl);
+                    localStorage.setItem('lampa_sync_password', password);
+                }
+                
+                console.log('[Lampa Sync] ✅ Settings saved:', { serverUrl, password: '***' });
+                alert('✅ Настройки сохранены! Плагин будет использовать новые настройки.');
+                
+                modal.remove();
+            });
+            
+            // Обработчик отмены
+            cancelBtn.addEventListener('click', () => {
+                modal.remove();
+            });
+            
+            // Закрытие по клику вне модального окна
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    modal.remove();
+                }
+            });
+            
+            // Закрытие по Escape
+            const escapeHandler = (e) => {
+                if (e.key === 'Escape') {
+                    modal.remove();
+                    document.removeEventListener('keydown', escapeHandler);
+                }
+            };
+            document.addEventListener('keydown', escapeHandler);
+            
+        } catch (e) {
+            console.error('[Lampa Sync] Error showing settings modal:', e);
+            alert('Ошибка при открытии настроек. Используйте консоль браузера для настройки.');
+        }
+    }
+    
+    // Функция для добавления настроек через Lampa.SettingsApi
     function addSettings() {
         try {
             if (!window.Lampa) {
@@ -1373,23 +1562,36 @@
             
             if (!window.Lampa.SettingsApi) {
                 console.log('[Lampa Sync] Lampa.SettingsApi not available');
+                // Если SettingsApi недоступен, используем модальное окно
+                console.log('[Lampa Sync] 💡 Use window.LampaSync.showSettings() to open settings');
                 return false;
             }
             
-            if (typeof Lampa.SettingsApi.addParam !== 'function') {
-                console.log('[Lampa Sync] Lampa.SettingsApi.addParam is not a function');
+            // Пробуем разные варианты API
+            const apiMethods = ['addParam', 'add', 'register', 'create'];
+            let methodFound = null;
+            
+            for (const method of apiMethods) {
+                if (typeof Lampa.SettingsApi[method] === 'function') {
+                    methodFound = method;
+                    break;
+                }
+            }
+            
+            if (!methodFound) {
+                console.log('[Lampa Sync] No suitable SettingsApi method found');
                 console.log('[Lampa Sync] Available methods:', Object.keys(Lampa.SettingsApi || {}));
                 return false;
             }
             
             // Пробуем разные варианты типов
-            const textTypes = ['text', 'string', 'input'];
+            const textTypes = ['text', 'string', 'input', 'url', 'password'];
             let successCount = 0;
             
             // Пробуем добавить URL сервера
             for (let textType of textTypes) {
                 try {
-                    Lampa.SettingsApi.addParam({
+                    const param = {
                         component: 'interface',
                         param: {
                             name: 'lampa_sync_server_url',
@@ -1398,14 +1600,15 @@
                         },
                         field: {
                             name: 'URL сервера синхронизации',
-                            description: 'Адрес сервера для синхронизации прогресса (например: http://localhost:3000 или https://your-domain.com)',
+                            description: 'Адрес сервера для синхронизации прогресса',
                         }
-                    });
-                    console.log('[Lampa Sync] URL setting added with type:', textType);
+                    };
+                    
+                    Lampa.SettingsApi[methodFound](param);
+                    console.log('[Lampa Sync] ✅ URL setting added with type:', textType);
                     successCount++;
-                    break; // Успешно добавили, выходим
+                    break;
                 } catch (e) {
-                    // Пробуем следующий тип
                     continue;
                 }
             }
@@ -1413,41 +1616,43 @@
             // Пробуем добавить пароль
             for (let textType of textTypes) {
                 try {
-                    Lampa.SettingsApi.addParam({
+                    const param = {
                         component: 'interface',
                         param: {
                             name: 'lampa_sync_password',
-                            type: textType,
+                            type: textType === 'password' ? 'password' : textType,
                             default: '',
                         },
                         field: {
                             name: 'Пароль синхронизации',
-                            description: 'Пароль для авторизации на сервере (должен совпадать с SYNC_PASSWORD в .env сервера)',
+                            description: 'Пароль для авторизации на сервере',
                         }
-                    });
-                    console.log('[Lampa Sync] Password setting added with type:', textType);
+                    };
+                    
+                    Lampa.SettingsApi[methodFound](param);
+                    console.log('[Lampa Sync] ✅ Password setting added with type:', textType);
                     successCount++;
-                    break; // Успешно добавили, выходим
+                    break;
                 } catch (e) {
-                    // Пробуем следующий тип
                     continue;
                 }
             }
             
             if (successCount === 2) {
                 console.log('[Lampa Sync] ✅ Settings successfully added to Lampa interface');
+                console.log('[Lampa Sync] 💡 Go to: Настройки → Интерфейс');
                 return true;
             } else if (successCount === 1) {
                 console.warn('[Lampa Sync] ⚠️ Only one setting was added');
                 return true;
             } else {
-                console.error('[Lampa Sync] ❌ Failed to add settings with any text type');
-                console.log('[Lampa Sync] Available SettingsApi methods:', Object.keys(Lampa.SettingsApi));
+                console.warn('[Lampa Sync] ⚠️ Failed to add settings via SettingsApi');
+                console.log('[Lampa Sync] 💡 Use window.LampaSync.showSettings() to open settings modal');
                 return false;
             }
         } catch (e) {
             console.error('[Lampa Sync] Error adding settings:', e);
-            console.error('[Lampa Sync] Error stack:', e.stack);
+            console.log('[Lampa Sync] 💡 Use window.LampaSync.showSettings() to open settings modal');
             return false;
         }
     }
@@ -1465,14 +1670,18 @@
                 setTimeout(tryAddSettings, 500);
             } else {
                 console.warn('[Lampa Sync] ⚠️ Failed to add settings to interface after', maxSettingsAttempts, 'attempts');
-                console.warn('[Lampa Sync] This may mean that Lampa does not support text input fields in settings.');
-                console.warn('[Lampa Sync] You can manually configure the plugin by running these commands in browser console:');
+                console.warn('[Lampa Sync] 💡 Используйте один из способов настройки:');
                 console.warn('');
-                console.warn('  localStorage.setItem("lampa_sync_server_url", "http://localhost:3000");');
-                console.warn('  localStorage.setItem("lampa_sync_password", "yourpassword");');
-                console.warn('  location.reload(); // Перезагрузите страницу');
+                console.warn('  Способ 1 (рекомендуется):');
+                console.warn('    window.LampaSync.showSettings()');
                 console.warn('');
-                console.warn('[Lampa Sync] Or use window.LampaSync.getConfig() to check current settings');
+                console.warn('  Способ 2 (через консоль):');
+                console.warn('    localStorage.setItem("lampa_sync_server_url", "http://localhost:3000");');
+                console.warn('    localStorage.setItem("lampa_sync_password", "yourpassword");');
+                console.warn('    location.reload();');
+                console.warn('');
+                console.warn('  Проверка текущих настроек:');
+                console.warn('    window.LampaSync.getConfig()');
             }
         }
     }
@@ -1527,7 +1736,46 @@
         saveProgress,
         getTmdbIdFromUrl,
         getCurrentFileId,
-        getConfig
+        getConfig,
+        showSettings: showSettingsModal
     };
+    
+    // Показываем инструкцию и модальное окно при загрузке, если настройки не заданы
+    setTimeout(() => {
+        const config = getConfig();
+        const needsSetup = !config.SYNC_PASSWORD || config.SYNC_SERVER_URL === 'http://localhost:3000';
+        
+        if (needsSetup) {
+            console.log('');
+            console.log('═══════════════════════════════════════════════════════════');
+            console.log('  🔧 LAMPA SYNC - ТРЕБУЕТСЯ НАСТРОЙКА');
+            console.log('═══════════════════════════════════════════════════════════');
+            console.log('');
+            console.log('  Для настройки плагина выполните в консоли:');
+            console.log('    window.LampaSync.showSettings()');
+            console.log('');
+            console.log('  Или настройте вручную через localStorage:');
+            console.log('    localStorage.setItem("lampa_sync_server_url", "http://localhost:3000");');
+            console.log('    localStorage.setItem("lampa_sync_password", "ваш_пароль");');
+            console.log('');
+            console.log('  Текущие настройки:');
+            console.log('    URL:', config.SYNC_SERVER_URL);
+            console.log('    Пароль:', config.SYNC_PASSWORD ? '***' : 'не задан');
+            console.log('');
+            console.log('═══════════════════════════════════════════════════════════');
+            console.log('');
+            
+            // Автоматически открываем модальное окно через 3 секунды после загрузки
+            // (даём время пользователю увидеть консоль)
+            setTimeout(() => {
+                // Проверяем, не настроено ли уже
+                const currentConfig = getConfig();
+                if (!currentConfig.SYNC_PASSWORD || currentConfig.SYNC_SERVER_URL === 'http://localhost:3000') {
+                    console.log('[Lampa Sync] 💡 Открываю окно настроек...');
+                    showSettingsModal();
+                }
+            }, 3000);
+        }
+    }, 2000);
 
 })();
