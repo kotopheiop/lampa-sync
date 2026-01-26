@@ -1982,6 +1982,9 @@
                                 placeholder="http://localhost:3000"
                                 autocomplete="off"
                                 spellcheck="false"
+                                readonly="false"
+                                disabled="false"
+                                contenteditable="true"
                             />
                             <small style="color: #888; font-size: 12px;">
                                 Адрес сервера для синхронизации прогресса
@@ -2007,6 +2010,9 @@
                                 placeholder="Введите пароль"
                                 autocomplete="off"
                                 spellcheck="false"
+                                readonly="false"
+                                disabled="false"
+                                contenteditable="true"
                             />
                             <small style="color: #888; font-size: 12px;">
                                 Должен совпадать с SYNC_PASSWORD в .env сервера
@@ -2061,21 +2067,32 @@
                 
                 // КРИТИЧНО: Предотвращаем перехват событий клавиатуры Lampa
                 // Lampa может перехватывать Backspace для навигации, нужно остановить это
-                urlInput.addEventListener('keydown', function(e) {
-                    // Разрешаем все клавиши внутри поля ввода
+                const urlInputKeyHandler = function(e) {
+                    // Останавливаем распространение ВСЕХ событий клавиатуры
                     e.stopPropagation();
-                    // Разрешаем Backspace, Delete и другие клавиши редактирования
-                    if (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'ArrowLeft' || 
-                        e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
-                        e.stopImmediatePropagation();
+                    e.stopImmediatePropagation();
+                    
+                    // Для Backspace и Delete явно предотвращаем дефолтное поведение навигации
+                    if (e.key === 'Backspace' || e.key === 'Delete') {
+                        // Не вызываем preventDefault() для Backspace/Delete, чтобы они работали в поле ввода
+                        // Но останавливаем распространение, чтобы Lampa не перехватила
+                        return true;
                     }
-                }, true); // Используем capture phase для перехвата до Lampa
+                };
                 
+                // Используем capture phase (true) для перехвата ДО того, как Lampa обработает
+                urlInput.addEventListener('keydown', urlInputKeyHandler, true);
                 urlInput.addEventListener('keyup', function(e) {
                     e.stopPropagation();
+                    e.stopImmediatePropagation();
+                }, true);
+                urlInput.addEventListener('keypress', function(e) {
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
                 }, true);
                 
-                urlInput.addEventListener('keypress', function(e) {
+                // Также перехватываем на уровне input для надёжности
+                urlInput.addEventListener('input', function(e) {
                     e.stopPropagation();
                 }, true);
                 
@@ -2092,19 +2109,24 @@
                 passwordInput.removeAttribute('disabled');
                 
                 // Аналогично для поля пароля
-                passwordInput.addEventListener('keydown', function(e) {
+                const passwordInputKeyHandler = function(e) {
                     e.stopPropagation();
-                    if (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'ArrowLeft' || 
-                        e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
-                        e.stopImmediatePropagation();
+                    e.stopImmediatePropagation();
+                    if (e.key === 'Backspace' || e.key === 'Delete') {
+                        return true;
                     }
-                }, true);
+                };
                 
+                passwordInput.addEventListener('keydown', passwordInputKeyHandler, true);
                 passwordInput.addEventListener('keyup', function(e) {
                     e.stopPropagation();
+                    e.stopImmediatePropagation();
                 }, true);
-                
                 passwordInput.addEventListener('keypress', function(e) {
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+                }, true);
+                passwordInput.addEventListener('input', function(e) {
                     e.stopPropagation();
                 }, true);
             }
