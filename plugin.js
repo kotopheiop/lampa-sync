@@ -336,6 +336,9 @@
                         lastFileViewTime[fileId] = data.time;
                         lastFileViewTime[fileId + '_percent'] = data.percent;
                         lastFileViewTime[fileId + '_timestamp'] = Date.now();
+                        
+                        // Обновляем UI после изменения прогресса
+                        updateUIAfterProgressChange(fileId, tmdbId);
                     }
                 } else {
                     console.warn('[Lampa Sync] file_view[' + fileId + '] not found, creating entry');
@@ -351,6 +354,9 @@
                     lastFileViewTime[fileId] = fileView[fileId].time;
                     lastFileViewTime[fileId + '_percent'] = fileView[fileId].percent;
                     lastFileViewTime[fileId + '_timestamp'] = Date.now();
+                    
+                    // Обновляем UI после создания новой записи
+                    updateUIAfterProgressChange(fileId, tmdbId);
                 }
             } else {
                 console.warn('[Lampa Sync] Cannot find file_id for tmdb:', tmdbId, '- progress not applied to file_view');
@@ -377,6 +383,212 @@
         } catch (e) {
             console.error('[Lampa Sync] Error loading progress:', e);
             return null;
+        }
+    }
+
+    /**
+     * Обновление UI после изменения file_view
+     * Вызывает события Lampa и обновляет DOM элементы
+     */
+    function updateUIAfterProgressChange(fileId, tmdbId) {
+        try {
+            // Способ 1: Вызываем событие через Subscribe (если доступно)
+            if (window.Subscribe && typeof window.Subscribe.fire === 'function') {
+                window.Subscribe.fire('file_view_updated', {
+                    file_id: fileId,
+                    tmdb_id: tmdbId
+                });
+                console.log('[Lampa Sync] Fired Subscribe event: file_view_updated');
+            }
+            
+            // Способ 2: Вызываем событие через Lampa.Listener (если доступно)
+            if (window.Lampa && window.Lampa.Listener && typeof window.Lampa.Listener.fire === 'function') {
+                window.Lampa.Listener.fire('file_view', {
+                    file_id: fileId,
+                    tmdb_id: tmdbId
+                });
+                console.log('[Lampa Sync] Fired Lampa.Listener event: file_view');
+            }
+            
+            // Способ 3: Обновляем DOM элементы напрямую
+            // Ищем карточки с данным TMDB ID и обновляем прогресс
+            if (tmdbId) {
+                const fileView = getStorage('file_view', {});
+                const progress = fileView[fileId];
+                
+                if (progress && progress.percent) {
+                    // Ищем элементы карточек по различным атрибутам (Lampa может использовать разные)
+                    const selectors = [
+                        `[data-id="${tmdbId}"]`,
+                        `[data-tmdb="${tmdbId}"]`,
+                        `[data-card="${tmdbId}"]`,
+                        `[href*="card=${tmdbId}"]`,
+                        `[href*="?card=${tmdbId}"]`
+                    ];
+                    
+                    let cards = [];
+                    selectors.forEach(selector => {
+                        try {
+                            const found = document.querySelectorAll(selector);
+                            if (found.length > 0) {
+                                cards = Array.from(found);
+                            }
+                        } catch (e) {
+                            // Игнорируем ошибки селекторов
+                        }
+                    });
+                    
+                    // Также ищем по URL в href (для карточек в списках)
+                    if (cards.length === 0) {
+                        const allLinks = document.querySelectorAll('a[href*="card="]');
+                        allLinks.forEach(link => {
+                            const href = link.getAttribute('href') || '';
+                            if (href.includes(`card=${tmdbId}`) || href.includes(`card=${tmdbId}&`)) {
+                                // Находим родительскую карточку
+                                const card = link.closest('.card, [class*="card"], [class*="item"]') || link.parentElement;
+                                if (card && !cards.includes(card)) {
+                                    cards.push(card);
+                                }
+                            }
+                        });
+                    }
+                    
+                    cards.forEach(card => {
+                        // Ищем элементы прогресса внутри карточки
+                        const progressSelectors = [
+                            '.progress',
+                            '.watched-progress',
+                            '.card-progress',
+                            '[class*="progress"]',
+                            '[class*="watched"]',
+                            '[class*="percent"]'
+                        ];
+                        
+                        progressSelectors.forEach(selector => {
+                            try {
+                                const progressElements = card.querySelectorAll(selector);
+                                progressElements.forEach(el => {
+                                    // Обновляем стиль ширины (для прогресс-баров)
+                                    if (el.style) {
+                                        el.style.width = progress.percent + '%';
+                                        // Также обновляем через CSS переменную, если используется
+                                        el.style.setProperty('--progress', progress.percent + '%');
+                                    }
+                                    
+                                    // Обновляем текст, если это текстовый элемент
+                                    if (el.textContent !== undefined && el.textContent.trim() !== '') {
+                                        // Обновляем только если это похоже на процент
+                                        const text = el.textContent.trim();
+                                        if (text.match(/\d+%/) || text.match(/\d+\s*\/\s*\d+/)) {
+                                            el.textContent = progress.percent + '%';
+                                        }
+                                    }
+                                    
+                                    // Обновляем data-атрибуты
+                                    el.setAttribute('data-progress', progress.percent);
+                                    el.setAttribute('data-time', progress.time);
+                                });
+                            } catch (e) {
+                                // Игнорируем ошибки
+                            }
+                        });
+                        
+                        // Также обновляем через data-атрибуты на самой карточке
+                        card.setAttribute('data-progress', progress.percent);
+                        card.setAttribute('data-time', progress.time);
+                        card.setAttribute('data-synced', 'true');
+                        
+                        // Добавляем класс для визуального индикатора обновления (опционально)
+                        card.classList.add('lampasync-synced');
+                        setTimeout(() => {
+                            card.classList.remove('lampasync-synced');
+                        }, 1000);
+                    });
+                    
+                    if (cards.length > 0) {
+                        console.log('[Lampa Sync] ✅ Updated', cards.length, 'card elements for TMDB:', tmdbId, 'Progress:', progress.percent + '%');
+                    }
+                    
+                    // Также обновляем прогресс на открытой карточке (Full component)
+                    // Проверяем, открыта ли карточка этого фильма
+                    const currentUrlTmdbId = getTmdbIdFromUrl();
+                    if (currentUrlTmdbId && parseInt(currentUrlTmdbId) === parseInt(tmdbId)) {
+                        // Ищем элементы прогресса на странице карточки
+                        const fullPageProgress = document.querySelectorAll(
+                            '.full-progress, .card-progress, [class*="progress"], [class*="watched"], [class*="time"]'
+                        );
+                        
+                        fullPageProgress.forEach(el => {
+                            // Обновляем элементы, которые показывают время или процент
+                            const text = el.textContent || '';
+                            if (text.match(/\d+%/) || text.match(/\d+\s*мин/) || text.match(/\d+\s*:\d+/)) {
+                                // Обновляем текст прогресса
+                                if (progress.percent > 0) {
+                                    el.textContent = progress.percent + '%';
+                                }
+                            }
+                            
+                            // Обновляем прогресс-бары
+                            if (el.style) {
+                                el.style.width = progress.percent + '%';
+                            }
+                        });
+                        
+                        // Обновляем кнопку "Продолжить просмотр", если она есть
+                        const continueButtons = document.querySelectorAll(
+                            'button[class*="continue"], a[class*="continue"], [class*="resume"]'
+                        );
+                        continueButtons.forEach(btn => {
+                            // Обновляем текст, если там указано время
+                            const btnText = btn.textContent || '';
+                            if (btnText.includes('Продолжить') || btnText.includes('Resume') || btnText.includes('Continue')) {
+                                // Можно обновить текст, добавив процент
+                                if (progress.percent > 0 && progress.percent < 95) {
+                                    btn.setAttribute('data-progress', progress.percent);
+                                }
+                            }
+                        });
+                        
+                        if (fullPageProgress.length > 0 || continueButtons.length > 0) {
+                            console.log('[Lampa Sync] ✅ Updated progress on full card page for TMDB:', tmdbId);
+                        }
+                    }
+                }
+            }
+            
+            // Способ 4: Принудительно обновляем компоненты через Lampa API (если доступно)
+            if (window.Lampa && window.Lampa.Full) {
+                // Пробуем обновить компонент Full (карточка фильма)
+                try {
+                    const fullComponent = window.Lampa.Full;
+                    if (fullComponent && typeof fullComponent.render === 'function') {
+                        // Не вызываем render напрямую, это может сломать UI
+                        // Вместо этого используем события
+                    }
+                } catch (e) {
+                    // Игнорируем ошибки
+                }
+            }
+            
+            // Способ 5: Создаём кастомное событие для других плагинов/компонентов
+            if (tmdbId) {
+                const fileView = getStorage('file_view', {});
+                const progress = fileView[fileId];
+                
+                const customEvent = new CustomEvent('lampasync:progress_updated', {
+                    detail: {
+                        file_id: fileId,
+                        tmdb_id: tmdbId,
+                        time: progress?.time || 0,
+                        percent: progress?.percent || 0
+                    }
+                });
+                window.dispatchEvent(customEvent);
+                console.log('[Lampa Sync] Dispatched custom event: lampasync:progress_updated');
+            }
+            
+        } catch (e) {
+            console.warn('[Lampa Sync] Error updating UI:', e);
         }
     }
 
@@ -993,6 +1205,52 @@
             }, 300);
         });
 
+        // Периодическая синхронизация прогресса с сервера (каждые 15 секунд)
+        // Это позволяет обновлять прогресс на втором устройстве без перезагрузки
+        setInterval(async () => {
+            const urlTmdbId = getTmdbIdFromUrl();
+            
+            // Если открыта карточка фильма (есть TMDB ID в URL)
+            if (urlTmdbId) {
+                try {
+                    // Загружаем прогресс с сервера
+                    const data = await loadProgress(urlTmdbId);
+                    
+                    if (data && data.time !== undefined && data.percent !== undefined) {
+                        const fileId = getCurrentFileId();
+                        
+                        if (fileId) {
+                            const fileView = getStorage('file_view', {});
+                            const currentProgress = fileView[fileId];
+                            
+                            // Если прогресс с сервера новее (больше времени), обновляем
+                            if (currentProgress && data.time > currentProgress.time) {
+                                const config = getConfig();
+                                if (data.time >= config.MIN_SEEK_TIME) {
+                                    fileView[fileId].time = data.time;
+                                    fileView[fileId].percent = data.percent;
+                                    setStorage('file_view', fileView);
+                                    
+                                    // Обновляем UI
+                                    updateUIAfterProgressChange(fileId, urlTmdbId);
+                                    
+                                    console.log('[Lampa Sync] 🔄 Progress synced from server:', {
+                                        tmdb: urlTmdbId,
+                                        fileId: fileId,
+                                        time: data.time,
+                                        percent: data.percent
+                                    });
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Игнорируем ошибки при периодической синхронизации
+                    // (чтобы не засорять консоль, если сервер недоступен)
+                }
+            }
+        }, 15000); // Каждые 15 секунд
+        
         // Периодическое автосохранение (каждые 30 секунд во время просмотра)
         setInterval(() => {
             if (currentTmdbId && currentFileId) {
