@@ -163,21 +163,33 @@
         return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(url.trim());
     }
 
+    // Сразу после сохранения в модалке используем этот URL/пароль, чтобы не тянуть localhost из Lampa.Storage
+    let lastSavedServerUrl = null;
+    let lastSavedPassword = null;
+
     function getConfig() {
+        if (lastSavedServerUrl !== null && lastSavedPassword !== null) {
+            return {
+                SYNC_SERVER_URL: String(lastSavedServerUrl).trim(),
+                SYNC_PASSWORD: String(lastSavedPassword).trim(),
+                MIN_SEEK_TIME: DEFAULT_CONFIG.MIN_SEEK_TIME,
+                REMOVE_AT_PERCENT: DEFAULT_CONFIG.REMOVE_AT_PERCENT,
+                SYNC_DELAY: DEFAULT_CONFIG.SYNC_DELAY,
+                FILE_VIEW_TIMEOUT: DEFAULT_CONFIG.FILE_VIEW_TIMEOUT
+            };
+        }
+
         let serverUrl = 'http://localhost:3000';
         let password = '';
         let urlFromStorage = null;
         let urlFromLampa = null;
 
-        // Читаем оба источника
         try {
             const storedUrl = localStorage.getItem('lampa_sync_server_url');
             const storedPassword = localStorage.getItem('lampa_sync_password');
             if (storedUrl && typeof storedUrl === 'string') urlFromStorage = storedUrl.trim();
             if (storedPassword && typeof storedPassword === 'string') password = storedPassword;
-        } catch (e) {
-            // игнорируем
-        }
+        } catch (e) {}
 
         if (window.Lampa && window.Lampa.Storage) {
             try {
@@ -191,12 +203,9 @@
                 }
                 if (u && typeof u === 'string') urlFromLampa = u.trim();
                 if (p && typeof p === 'string') password = (p || password || '').trim();
-            } catch (e) {
-                // игнорируем
-            }
+            } catch (e) {}
         }
 
-        // Выбор URL: приоритет у не-localhost, чтобы сохранённый ngrok не перезаписывался настройками Lampa (localhost)
         const preferLocalhost = (a, b) => {
             const aLocal = isLocalhostUrl(a);
             const bLocal = isLocalhostUrl(b);
@@ -382,19 +391,19 @@
 
             return await response.json();
         } catch (e) {
-            // Определяем тип ошибки для более информативного сообщения
             const errorMessage = e.message || String(e);
+            const isNetworkOrCors = errorMessage.includes('fetch') || errorMessage.includes('CORS') || errorMessage.includes('NetworkError');
+            if (isNetworkOrCors && !window._lampaSync502Hint) {
+                window._lampaSync502Hint = true;
+                console.warn('[Lampa Sync] При 502 или CORS: проверьте, что сервер запущен (cd server && npm start) и ngrok проксирует (ngrok http 3000).');
+            }
             
             if (errorMessage.includes('ERR_CONNECTION_REFUSED') || errorMessage.includes('Failed to fetch')) {
-                // Ошибка подключения - сервер не запущен или недоступен
-                const errorMsg = 'Connection refused: Server is not running or not accessible. ' +
-                    'Make sure the server is started and listening on 0.0.0.0 (not just localhost).';
+                const errorMsg = 'Connection refused: Server is not running or not accessible. Start server (npm start) and ngrok (ngrok http 3000).';
                 console.warn('[Lampa Sync]', errorMsg);
                 throw new Error(errorMsg);
             } else if (errorMessage.includes('CORS') || errorMessage.includes('blocked by CORS')) {
-                // Ошибка CORS
-                const errorMsg = 'CORS error: Server may not be accessible from this origin. ' +
-                    'If using localhost, try using your local IP address (e.g., http://192.168.1.100:3000) or set up CORS on the server.';
+                const errorMsg = 'CORS/502: Server not reached. Start server and ngrok, or use same-origin URL.';
                 console.warn('[Lampa Sync]', errorMsg);
                 throw new Error(errorMsg);
             }
@@ -1150,6 +1159,16 @@
      */
     function startPlugin() {
         console.log('[Lampa Sync] Plugin initialized by @kotopheiop');
+        
+        // Если в localStorage уже сохранён не-localhost URL и пароль — фиксируем их, чтобы запросы не уходили на localhost
+        try {
+            const u = localStorage.getItem('lampa_sync_server_url');
+            const p = localStorage.getItem('lampa_sync_password');
+            if (u && typeof u === 'string' && p !== null && String(p).trim().length > 0 && !isLocalhostUrl(u)) {
+                lastSavedServerUrl = u.trim();
+                lastSavedPassword = String(p).trim();
+            }
+        } catch (e) {}
         
         const config = getConfig();
         console.log('[Lampa Sync] Server URL:', config.SYNC_SERVER_URL);
@@ -2209,13 +2228,15 @@
                     return;
                 }
                 
-                // Сохраняем настройки В ОБА места — getConfig() читает сначала localStorage
                 localStorage.setItem('lampa_sync_server_url', serverUrl);
                 localStorage.setItem('lampa_sync_password', password);
                 if (window.Lampa && window.Lampa.Storage) {
                     Lampa.Storage.set('lampa_sync_server_url', serverUrl);
                     Lampa.Storage.set('lampa_sync_password', password);
                 }
+                // Сразу переключаем конфиг на новый URL, чтобы следующие запросы не шли на localhost
+                lastSavedServerUrl = serverUrl;
+                lastSavedPassword = password;
                 
                 console.log('[Lampa Sync] ✅ Settings saved:', { serverUrl, password: '***' });
                 alert('✅ Настройки сохранены! Плагин будет использовать новый URL.');
