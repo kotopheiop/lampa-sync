@@ -1980,6 +1980,16 @@
         try {
             const config = getConfig();
             
+            // Если плагин загружен из iframe (CDN), модалка должна быть в top-документе, иначе её не видно
+            let targetDoc = document;
+            try {
+                if (window.top && window.top !== window && window.top.document && window.top.document.body) {
+                    targetDoc = window.top.document;
+                }
+            } catch (e) {
+                // Cross-origin: остаёмся в текущем document
+            }
+            
             // Создаём HTML для модального окна
             const modalHtml = `
                 <div class="lampasync-settings-modal" style="
@@ -2085,20 +2095,20 @@
                 </div>
             `;
             
-            // Удаляем старое модальное окно, если есть
-            const oldModal = document.querySelector('.lampasync-settings-modal');
+            // Удаляем старое модальное окно, если есть (в целевом документе)
+            const oldModal = targetDoc.querySelector('.lampasync-settings-modal');
             if (oldModal) {
                 oldModal.remove();
             }
             
-            // Добавляем модальное окно
-            document.body.insertAdjacentHTML('beforeend', modalHtml);
+            // Добавляем модальное окно в целевой документ (top или текущий)
+            targetDoc.body.insertAdjacentHTML('beforeend', modalHtml);
             
-            const modal = document.querySelector('.lampasync-settings-modal');
-            const saveBtn = document.getElementById('lampasync-save');
-            const cancelBtn = document.getElementById('lampasync-cancel');
-            const urlInput = document.getElementById('lampasync-server-url');
-            const passwordInput = document.getElementById('lampasync-password');
+            const modal = targetDoc.querySelector('.lampasync-settings-modal');
+            const saveBtn = targetDoc.getElementById('lampasync-save');
+            const cancelBtn = targetDoc.getElementById('lampasync-cancel');
+            const urlInput = targetDoc.getElementById('lampasync-server-url');
+            const passwordInput = targetDoc.getElementById('lampasync-password');
             
             // Убеждаемся, что поля редактируемы и фокусируем первое поле
             if (urlInput) {
@@ -2574,12 +2584,14 @@
     
     console.log('[Lampa Sync] ✅ Cleanup function available as: window.LampaSyncCleanSettings()');
     
-    // Показываем инструкцию и модальное окно только если настройки ещё не заданы (нет пароля или нет URL)
+    // Показываем инструкцию и модалку, если: нет пароля/URL или страница удалённая, а сервер — localhost (CORS)
     setTimeout(() => {
         const config = getConfig();
         const hasPassword = config.SYNC_PASSWORD && String(config.SYNC_PASSWORD).trim().length > 0;
         const hasServerUrl = config.SYNC_SERVER_URL && String(config.SYNC_SERVER_URL).trim().length > 0;
-        const needsSetup = !hasPassword || !hasServerUrl;
+        const isRemotePage = typeof location !== 'undefined' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1';
+        const serverIsLocalhost = isLocalhostUrl(config.SYNC_SERVER_URL);
+        const needsSetup = !hasPassword || !hasServerUrl || (isRemotePage && serverIsLocalhost);
         
         if (needsSetup) {
             console.log('');
@@ -2591,28 +2603,33 @@
             console.log('    window.LampaSync.showSettings()');
             console.log('');
             console.log('  Или настройте вручную через localStorage:');
-            console.log('    localStorage.setItem("lampa_sync_server_url", "http://localhost:3000");');
+            console.log('    localStorage.setItem("lampa_sync_server_url", "https://ваш-ngrok.ngrok-free.dev");');
             console.log('    localStorage.setItem("lampa_sync_password", "ваш_пароль");');
             console.log('');
             console.log('  Текущие настройки:');
             console.log('    URL:', config.SYNC_SERVER_URL || '(не задан)');
             console.log('    Пароль:', config.SYNC_PASSWORD ? '***' : 'не задан');
+            if (isRemotePage && serverIsLocalhost) {
+                console.log('  ⚠️ Сайт открыт не с localhost — укажите публичный URL сервера (ngrok).');
+            }
             console.log('  Важно: пароль должен совпадать с SYNC_PASSWORD в .env на сервере.');
             console.log('');
             console.log('═══════════════════════════════════════════════════════════');
             console.log('');
             
-            // Автоматически открываем модальное окно через 3 секунды только если всё ещё не настроено
+            // Открываем модалку через 1.2 с (раньше, чтобы пользователь успел её увидеть)
             setTimeout(() => {
                 const currentConfig = getConfig();
                 const nowHasPassword = currentConfig.SYNC_PASSWORD && String(currentConfig.SYNC_PASSWORD).trim().length > 0;
                 const nowHasUrl = currentConfig.SYNC_SERVER_URL && String(currentConfig.SYNC_SERVER_URL).trim().length > 0;
-                if (!nowHasPassword || !nowHasUrl) {
+                const stillLocalhost = isLocalhostUrl(currentConfig.SYNC_SERVER_URL);
+                const needModal = !nowHasPassword || !nowHasUrl || (isRemotePage && stillLocalhost);
+                if (needModal) {
                     console.log('[Lampa Sync] 💡 Открываю окно настроек...');
                     showSettingsModal();
                 }
-            }, 3000);
+            }, 1200);
         }
-    }, 2000);
+    }, 800);
 
 })();
