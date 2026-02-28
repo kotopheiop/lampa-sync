@@ -158,35 +158,41 @@
      * Получение конфигурации из настроек Lampa
      */
     function getConfig() {
-        // Пробуем получить через Lampa.Storage, если доступен
         let serverUrl = 'http://localhost:3000';
         let password = '';
         
+        // Сначала пробуем localStorage — самый надёжный источник для нашего плагина
+        try {
+            const storedUrl = localStorage.getItem('lampa_sync_server_url');
+            const storedPassword = localStorage.getItem('lampa_sync_password');
+            if (storedUrl && typeof storedUrl === 'string') serverUrl = storedUrl;
+            if (storedPassword && typeof storedPassword === 'string') password = storedPassword;
+        } catch (e) {
+            // игнорируем
+        }
+        
+        // Дополнительно проверяем Lampa.Storage (может переопределить)
         if (window.Lampa && window.Lampa.Storage) {
-            // Используем field() для совместимости с Lampa.Params
-            if (typeof Lampa.Storage.field === 'function') {
-                serverUrl = Lampa.Storage.field('lampa_sync_server_url') || serverUrl;
-                password = Lampa.Storage.field('lampa_sync_password') || password;
-            } else {
-                // Fallback на get()
-                serverUrl = Lampa.Storage.get('lampa_sync_server_url') || serverUrl;
-                password = Lampa.Storage.get('lampa_sync_password') || password;
-            }
-        } else {
-            // Fallback на localStorage
             try {
-                const storedUrl = localStorage.getItem('lampa_sync_server_url');
-                const storedPassword = localStorage.getItem('lampa_sync_password');
-                if (storedUrl) serverUrl = storedUrl;
-                if (storedPassword) password = storedPassword;
+                if (typeof Lampa.Storage.field === 'function') {
+                    const u = Lampa.Storage.field('lampa_sync_server_url');
+                    const p = Lampa.Storage.field('lampa_sync_password');
+                    if (u && typeof u === 'string') serverUrl = u;
+                    if (p && typeof p === 'string') password = p;
+                } else {
+                    const u = Lampa.Storage.get('lampa_sync_server_url');
+                    const p = Lampa.Storage.get('lampa_sync_password');
+                    if (u && typeof u === 'string') serverUrl = u;
+                    if (p && typeof p === 'string') password = p;
+                }
             } catch (e) {
-                console.warn('[Lampa Sync] Error reading config from localStorage:', e);
+                // игнорируем, оставляем значения из localStorage
             }
         }
         
-        // Убеждаемся, что значения - строки
-        serverUrl = String(serverUrl || 'http://localhost:3000');
-        password = String(password || '');
+        // Приводим к строке и убираем пробелы по краям
+        serverUrl = String(serverUrl || 'http://localhost:3000').trim();
+        password = String(password || '').trim();
         
         return {
             SYNC_SERVER_URL: serverUrl,
@@ -329,7 +335,8 @@
             
             if (!response.ok) {
                 if (response.status === 401) {
-                    throw new Error('Unauthorized: Check SYNC_PASSWORD in settings');
+                    console.warn('[Lampa Sync] 401 Unauthorized. Пароль в настройках Lampa должен совпадать с SYNC_PASSWORD в файле .env на сервере.');
+                    throw new Error('Unauthorized: Пароль в настройках должен совпадать с SYNC_PASSWORD в .env на сервере');
                 }
                 if (response.status === 404) {
                     // 404 - это нормально, просто прогресса нет на сервере
@@ -2593,6 +2600,7 @@
             console.log('  Текущие настройки:');
             console.log('    URL:', config.SYNC_SERVER_URL);
             console.log('    Пароль:', config.SYNC_PASSWORD ? '***' : 'не задан');
+            console.log('  Важно: пароль должен совпадать с SYNC_PASSWORD в .env на сервере.');
             console.log('');
             console.log('═══════════════════════════════════════════════════════════');
             console.log('');
