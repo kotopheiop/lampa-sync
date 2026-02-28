@@ -157,40 +157,55 @@
     /**
      * Получение конфигурации из настроек Lampa
      */
+    /** Проверка, является ли URL localhost/127.0.0.1 */
+    function isLocalhostUrl(url) {
+        if (!url || typeof url !== 'string') return true;
+        return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(url.trim());
+    }
+
     function getConfig() {
         let serverUrl = 'http://localhost:3000';
         let password = '';
-        
-        // Сначала пробуем localStorage — самый надёжный источник для нашего плагина
+        let urlFromStorage = null;
+        let urlFromLampa = null;
+
+        // Читаем оба источника
         try {
             const storedUrl = localStorage.getItem('lampa_sync_server_url');
             const storedPassword = localStorage.getItem('lampa_sync_password');
-            if (storedUrl && typeof storedUrl === 'string') serverUrl = storedUrl;
+            if (storedUrl && typeof storedUrl === 'string') urlFromStorage = storedUrl.trim();
             if (storedPassword && typeof storedPassword === 'string') password = storedPassword;
         } catch (e) {
             // игнорируем
         }
-        
-        // Дополнительно проверяем Lampa.Storage (может переопределить)
+
         if (window.Lampa && window.Lampa.Storage) {
             try {
+                let u = null, p = null;
                 if (typeof Lampa.Storage.field === 'function') {
-                    const u = Lampa.Storage.field('lampa_sync_server_url');
-                    const p = Lampa.Storage.field('lampa_sync_password');
-                    if (u && typeof u === 'string') serverUrl = u;
-                    if (p && typeof p === 'string') password = p;
+                    u = Lampa.Storage.field('lampa_sync_server_url');
+                    p = Lampa.Storage.field('lampa_sync_password');
                 } else {
-                    const u = Lampa.Storage.get('lampa_sync_server_url');
-                    const p = Lampa.Storage.get('lampa_sync_password');
-                    if (u && typeof u === 'string') serverUrl = u;
-                    if (p && typeof p === 'string') password = p;
+                    u = Lampa.Storage.get('lampa_sync_server_url');
+                    p = Lampa.Storage.get('lampa_sync_password');
                 }
+                if (u && typeof u === 'string') urlFromLampa = u.trim();
+                if (p && typeof p === 'string') password = (p || password || '').trim();
             } catch (e) {
-                // игнорируем, оставляем значения из localStorage
+                // игнорируем
             }
         }
-        
-        // Приводим к строке и убираем пробелы по краям
+
+        // Выбор URL: приоритет у не-localhost, чтобы сохранённый ngrok не перезаписывался настройками Lampa (localhost)
+        const preferLocalhost = (a, b) => {
+            const aLocal = isLocalhostUrl(a);
+            const bLocal = isLocalhostUrl(b);
+            if (!aLocal && bLocal) return a;
+            if (aLocal && !bLocal) return b;
+            return b || a || 'http://localhost:3000';
+        };
+        serverUrl = preferLocalhost(urlFromStorage, urlFromLampa) || urlFromStorage || urlFromLampa || 'http://localhost:3000';
+
         serverUrl = String(serverUrl || 'http://localhost:3000').trim();
         password = String(password || '').trim();
         
@@ -314,9 +329,8 @@
             }
             
             // Однократное предупреждение: localhost с другого домена заблокирует CORS
-            const isLocalhostUrl = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(config.SYNC_SERVER_URL);
             const isRemotePage = typeof location !== 'undefined' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1';
-            if (isLocalhostUrl && isRemotePage && !window._lampaSyncCorsWarned) {
+            if (isLocalhostUrl(config.SYNC_SERVER_URL) && isRemotePage && !window._lampaSyncCorsWarned) {
                 window._lampaSyncCorsWarned = true;
                 console.warn('[Lampa Sync] Сайт открыт с другого домена, а URL сервера — localhost. Запросы будут заблокированы (CORS). Укажите публичный URL сервера (например ngrok) в настройках: window.LampaSync.showSettings()');
             }
