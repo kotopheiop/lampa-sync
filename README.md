@@ -35,7 +35,7 @@ https://kotopheiop.github.io/lampa-sync/plugin.js
 ## Требования
 
 - Lampa с поддержкой расширений
-- Свой сервер синхронизации ([Docker / Node](https://github.com/kotopheiop/lampa-sync-server))
+- Свой сервер синхронизации ([Docker / Go](https://github.com/kotopheiop/lampa-sync-server))
 
 ## Ссылки
 

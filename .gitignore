@@ -1,0 +1,11 @@
+.DS_Store
+*.log
+*.swp
+.idea/
+.vscode/
+server/.env
+server/data/
+server/progress.json
+server/favorite.json
+server/lampa-sync-server
+server/node_modules/
