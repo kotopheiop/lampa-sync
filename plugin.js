@@ -992,7 +992,8 @@
         }
     }
 
-    const FAVORITE_LIST_KEYS = ['like', 'watch', 'book', 'history', 'look', 'viewed', 'scheduled', 'continued', 'thrown'];
+    // Lampa хранит «позже» как `wath` (опечатка в ядре); `watch` оставляем для совместимости
+    const FAVORITE_LIST_KEYS = ['like', 'wath', 'watch', 'book', 'history', 'look', 'viewed', 'scheduled', 'continued', 'thrown'];
     const FILE_MAP_KEY = 'lampasync_file_map';
 
     function loadFileMap() {
@@ -1127,7 +1128,9 @@
                 favorite: {
                     card: (favorite.card || []).map((c) => (c && typeof c === 'object' && c.id != null ? c.id : c)),
                     like: favorite.like || [],
-                    watch: favorite.watch || [],
+                    // Lampa: wath; сервер/старые клиенты: watch — шлём объединение
+                    watch: uniqueFavoriteIds(favorite.watch || [], favorite.wath || []),
+                    wath: uniqueFavoriteIds(favorite.wath || [], favorite.watch || []),
                     book: favorite.book || [],
                     history: favorite.history || [],
                     look: favorite.look || [],
@@ -1267,7 +1270,7 @@
         applyingFavorite = true;
         const current = getStorage('favorite', {});
         // списки ID — как на сервере (чтобы удаления не возвращались)
-        const idArrays = ['like', 'watch', 'book', 'history', 'look', 'viewed', 'scheduled', 'continued', 'thrown'];
+        const idArrays = ['like', 'wath', 'watch', 'book', 'history', 'look', 'viewed', 'scheduled', 'continued', 'thrown'];
         const next = { ...current };
         idArrays.forEach((key) => {
             next[key] = [...new Set((serverFavorite[key] || []).map((x) => {
@@ -1277,12 +1280,19 @@
                 return null;
             }).filter((x) => x != null))];
         });
+        // Lampa читает wath — зеркалим watch↔wath
+        next.wath = uniqueFavoriteIds(next.watch || [], next.wath || []);
+        next.watch = uniqueFavoriteIds(next.wath || [], next.watch || []);
         // card: сохраняем полные локальные объекты + stubs для недостающих
         const cardById = new Map();
         (current.card || []).forEach((item) => {
             if (item && typeof item === 'object' && item.id != null) cardById.set(Number(item.id) || item.id, item);
+            else if (item != null && (typeof item === 'number' || typeof item === 'string')) {
+                const id = normalizeFavoriteId(item);
+                if (id != null) cardById.set(Number(id) || id, { id: Number(id) || id, source: 'tmdb' });
+            }
         });
-        const needed = new Set([...(next.history || []), ...(next.book || []), ...(next.like || []), ...(next.watch || [])]);
+        const needed = new Set([...(next.history || []), ...(next.book || []), ...(next.like || []), ...(next.wath || []), ...(next.watch || [])]);
         (serverFavorite.card || []).forEach((id) => needed.add(typeof id === 'object' ? id.id : id));
         next.card = [...needed].map((id) => {
             const n = Number(id) || id;

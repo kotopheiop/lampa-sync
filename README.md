@@ -14,7 +14,7 @@ https://kotopheiop.github.io/lampa-sync/plugin.js
 
 1. Подними сервер: [lampa-sync-server](https://github.com/kotopheiop/lampa-sync-server) (отдельный репозиторий)
 2. В Lampa: **Настройки → Интерфейс → Синхронизация прогресса**
-   - **URL сервера** — например `http://192.168.1.10:3000`
+   - **URL сервера** — публичный адрес VPS, например `https://lampa-sync.example.com` (**не** `localhost`)
    - **Пароль** — тот же, что `SYNC_PASSWORD` в `.env` сервера
 3. Нажми **Проверить подключение** (или кнопку sync в шапке рядом с поиском)
 
