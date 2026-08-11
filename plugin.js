@@ -1104,11 +1104,17 @@
     }
 
     /**
-     * Реальное локальное избранное: Favorite.full / Favorite.get (CUB) / Storage.
-     * На ТВ с CUB Storage.get('favorite') часто пустой — UI берёт закладки из Account.
+     * Реальное локальное избранное: Favorite.full / Favorite.get / Favorite.all / Storage / CUB cache.
      */
     function readLocalFavorite() {
-        // 1) In-memory Lampa.Favorite (без CUB)
+        // Обновить in-memory из Storage (на ТВ sync часто стартует раньше Favorite.init)
+        try {
+            if (window.Lampa && Lampa.Favorite && typeof Lampa.Favorite.read === 'function') {
+                Lampa.Favorite.read(true);
+            }
+        } catch (_) {}
+
+        // 1) In-memory Lampa.Favorite.full
         try {
             if (window.Lampa && Lampa.Favorite && typeof Lampa.Favorite.full === 'function') {
                 const full = Lampa.Favorite.full();
@@ -1118,7 +1124,37 @@
             }
         } catch (_) {}
 
-        // 2) По типам — работает и с CUB (Account.Bookmarks)
+        // 2) Favorite.all() — карты по типам
+        try {
+            if (window.Lampa && Lampa.Favorite && typeof Lampa.Favorite.all === 'function') {
+                const all = Lampa.Favorite.all();
+                if (all && typeof all === 'object') {
+                    const out = emptyFavoriteObject();
+                    const cardById = new Map();
+                    Object.keys(all).forEach((type) => {
+                        const cards = Array.isArray(all[type]) ? all[type] : [];
+                        out[type === 'watch' ? 'wath' : type] = cards.map((c) => normalizeFavoriteId(c)).filter((x) => x != null);
+                        cards.forEach((c) => {
+                            if (c && typeof c === 'object' && c.id != null) {
+                                cardById.set(Number(c.id) || c.id, c);
+                            }
+                        });
+                    });
+                    out.wath = uniqueFavoriteIds(out.watch || [], out.wath || []);
+                    out.watch = out.wath.slice();
+                    out.card = [...cardById.values()];
+                    if (favoriteListLen(out) > 0) {
+                        console.log('[Lampa Sync] readLocalFavorite via Favorite.all:', {
+                            history: out.history.length,
+                            book: out.book.length
+                        });
+                        return normalizeLocalFavorite(out);
+                    }
+                }
+            }
+        } catch (_) {}
+
+        // 3) По типам Favorite.get (CUB / local)
         try {
             if (window.Lampa && Lampa.Favorite && typeof Lampa.Favorite.get === 'function') {
                 const out = emptyFavoriteObject();
@@ -1150,7 +1186,7 @@
             console.warn('[Lampa Sync] Favorite.get read failed:', e.message || e);
         }
 
-        // 3) Storage / localStorage — как в старых Lampa: default '{}' строкой
+        // 4) Storage / localStorage — как в старых Lampa: default '{}' строкой
         let fav = null;
         try {
             if (window.Lampa && Lampa.Storage && typeof Lampa.Storage.get === 'function') {
@@ -1173,7 +1209,90 @@
                 if (raw) fav = JSON.parse(raw);
             } catch (_) {}
         }
+
+        // 5) Скан localStorage на похожие ключи (форки / старые билды)
+        if (favoriteListLen(fav) === 0) {
+            try {
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    if (!key || !/favorite|bookmark/i.test(key)) continue;
+                    if (/lampa_sync|lampasync|account_bookmarks_sync/i.test(key)) continue;
+                    let parsed = null;
+                    try { parsed = JSON.parse(localStorage.getItem(key)); } catch (_) { continue; }
+                    if (parsed && typeof parsed === 'object' && (parsed.history || parsed.book || parsed.card)) {
+                        if (favoriteListLen(parsed) > favoriteListLen(fav)) {
+                            fav = parsed;
+                            console.log('[Lampa Sync] favorite from localStorage key:', key, favoriteListLen(fav));
+                        }
+                    }
+                }
+            } catch (_) {}
+        }
+
         return normalizeLocalFavorite(fav || {});
+    }
+
+    function favoriteFromBookmarkRows(rows) {
+        const out = emptyFavoriteObject();
+        const cardById = new Map();
+        (rows || []).forEach((row) => {
+            if (!row || !row.type) return;
+            const type = row.type === 'watch' ? 'wath' : row.type;
+            const id = normalizeFavoriteId(row.card_id != null ? row.card_id : (row.data && row.data.id));
+            if (id == null) return;
+            if (!out[type]) out[type] = [];
+            out[type].push(id);
+            const card = row.data;
+            if (card && typeof card === 'object' && card.id != null) {
+                cardById.set(Number(card.id) || card.id, card);
+            }
+        });
+        out.watch = uniqueFavoriteIds(out.wath || [], out.watch || []);
+        out.wath = uniqueFavoriteIds(out.watch || [], out.wath || []);
+        Object.keys(out).forEach((k) => {
+            if (k === 'card' || k === 'updated') return;
+            if (Array.isArray(out[k])) out[k] = uniqueFavoriteIds(out[k]);
+        });
+        const needed = new Set([
+            ...out.history, ...out.book, ...out.like, ...out.wath,
+            ...out.look, ...out.viewed, ...out.scheduled, ...out.continued, ...out.thrown
+        ].map((x) => Number(x) || x));
+        out.card = [...needed].map((id) => cardById.get(id) || { id, source: 'tmdb' });
+        return normalizeLocalFavorite(out);
+    }
+
+    async function readLocalFavoriteAsync() {
+        let fav = readLocalFavorite();
+        if (favoriteListLen(fav) > 0) return fav;
+
+        // Повтор: на Android TV Favorite/Storage иногда не готовы в первые секунды
+        await new Promise((r) => setTimeout(r, 2000));
+        fav = readLocalFavorite();
+        if (favoriteListLen(fav) > 0) {
+            console.log('[Lampa Sync] favorite appeared after retry');
+            return fav;
+        }
+
+        // CUB IndexedDB cache
+        try {
+            const permit = window.Lampa && Lampa.Account && Lampa.Account.Permit;
+            const pid = permit && permit.account && permit.account.profile && permit.account.profile.id;
+            if (pid && Lampa.Cache && typeof Lampa.Cache.getData === 'function') {
+                const rows = await Lampa.Cache.getData('other', 'account_bookmarks_' + pid).catch(() => null);
+                if (rows && rows.length) {
+                    fav = favoriteFromBookmarkRows(rows);
+                    if (favoriteListLen(fav) > 0) {
+                        console.log('[Lampa Sync] favorite from CUB cache:', favoriteListLen(fav));
+                        return fav;
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('[Lampa Sync] CUB cache read:', e.message || e);
+        }
+
+        await new Promise((r) => setTimeout(r, 2000));
+        return readLocalFavorite();
     }
 
     function notifySync(msg) {
@@ -1512,20 +1631,34 @@
                 return null;
             }
 
-            // 1) Favorite — всегда читаем реальное локальное (CUB/Favorite API), merge + push
+            // 1) Favorite — ждём готовности Storage на ТВ, не затираем локальное пустым чтением
             const serverFav = data.favorite || emptyFavoriteObject();
-            const localFav = readLocalFavorite();
-            let mergedFavorite = mergeFavoriteUnion(localFav, serverFav);
+            let localFav = await readLocalFavoriteAsync();
+            const localLen = favoriteListLen(localFav);
+            const serverLen = favoriteListLen(serverFav);
 
             console.log('[Lampa Sync] favorite sync:', {
                 localHistory: (localFav.history || []).length,
                 localBook: (localFav.book || []).length,
+                localTotal: localLen,
                 serverHistory: (serverFav.history || []).length,
                 serverBook: (serverFav.book || []).length,
-                mergedHistory: (mergedFavorite.history || []).length
+                serverTotal: serverLen
             });
+            notifySync('Локально: история ' + ((localFav.history || []).length) +
+                ' / закладки ' + ((localFav.book || []).length) +
+                ' → сервер: ' + ((serverFav.history || []).length));
 
-            if (favoriteListLen(localFav) > 0 || favoriteListLen(serverFav) > 0) {
+            let mergedFavorite = mergeFavoriteUnion(localFav, serverFav);
+
+            if (localLen === 0 && serverLen > 0) {
+                // Новое пустое устройство — можно тянуть сервер.
+                // Если локально «пусто» ошибочно, повтор выше уже был; пишем сервер только тогда.
+                applyingFavorite = true;
+                setStorage('favorite', mergedFavorite);
+                setTimeout(() => { applyingFavorite = false; }, 1200);
+                console.log('[Lampa Sync] local empty → applied server favorite');
+            } else if (localLen > 0) {
                 applyingFavorite = true;
                 setStorage('favorite', mergedFavorite);
                 setTimeout(() => { applyingFavorite = false; }, 1200);
@@ -1535,9 +1668,9 @@
                     favorite: mergedFavorite
                 });
                 if (pushed && pushed.success) {
-                    notifySync('Синк: история ' + (pushed.history || 0) + ', закладки ' + (pushed.book || 0));
-                } else if (favoriteListLen(localFav) > 0) {
-                    notifySync('Синк избранного не удался — проверь URL/пароль');
+                    notifySync('Выгружено: история ' + (pushed.history || 0) + ', закладки ' + (pushed.book || 0));
+                } else {
+                    notifySync('Выгрузка избранного не удалась');
                 }
 
                 try {
@@ -1804,7 +1937,7 @@
                 name: 'Lampa Sync',
                 author: '@kotopheiop',
                 descr: 'Синхронизация прогресса, истории и закладок между устройствами',
-                version: '1.3.1'
+                version: '1.3.2'
             };
 
             const ourBase = (PLUGIN_SCRIPT_URL || '').split('?')[0];
@@ -1867,17 +2000,20 @@
             console.warn('[Lampa Sync] Server URL is empty or localhost — на ТВ укажи публичный URL VPS (https://…)');
             notifySync('Lampa Sync: укажи URL сервера (не localhost)');
         } else {
-            // Проверяем доступность сервера и сразу тянем полный sync
-            apiRequest('/health')
-                .then(data => {
-                    console.log('[Lampa Sync] ✅ Server is available:', data);
-                    return syncAll();
-                })
-                .catch(e => {
-                    const errorMsg = e.message || String(e);
-                    console.warn('[Lampa Sync] ⚠️ Server is not available:', errorMsg);
-                    notifySync('Lampa Sync: сервер недоступен');
-                });
+            // На ТВ Favorite/Storage могут быть не готовы сразу — откладываем первый sync
+            const run = () => {
+                apiRequest('/health')
+                    .then(data => {
+                        console.log('[Lampa Sync] ✅ Server is available:', data);
+                        return syncAll();
+                    })
+                    .catch(e => {
+                        const errorMsg = e.message || String(e);
+                        console.warn('[Lampa Sync] ⚠️ Server is not available:', errorMsg);
+                        notifySync('Lampa Sync: сервер недоступен');
+                    });
+            };
+            setTimeout(run, 3500);
         }
 
         // Пушим favorite при изменениях (закладки / удаление из истории)
