@@ -1937,7 +1937,7 @@
                 name: 'Lampa Sync',
                 author: '@kotopheiop',
                 descr: 'Синхронизация прогресса, истории и закладок между устройствами',
-                version: '1.3.2'
+                version: '1.4.0'
             };
 
             const ourBase = (PLUGIN_SCRIPT_URL || '').split('?')[0];
@@ -2018,25 +2018,216 @@
 
         // Пушим favorite при изменениях (закладки / удаление из истории)
         let favoritePushTimer = null;
+        function scheduleFavoritePush(reason, favoriteOverride) {
+            if (favoritePushTimer) clearTimeout(favoritePushTimer);
+            favoritePushTimer = setTimeout(() => {
+                if (applyingFavorite) return;
+                pushFavorite(reason || 'favorite-change', {
+                    mode: 'merge',
+                    favorite: favoriteOverride || readLocalFavorite()
+                }).catch(() => {});
+            }, 600);
+        }
+
+        function applyFavoriteEvent(kind, e) {
+            const fav = readLocalFavorite();
+            if (!e || !e.where) return fav;
+            const where = e.where === 'watch' ? 'wath' : e.where;
+            const id = normalizeFavoriteId(e.card);
+            if (id == null) return fav;
+            if (!Array.isArray(fav[where])) fav[where] = [];
+            if (kind === 'remove') {
+                fav[where] = fav[where].filter((x) => String(x) !== String(id));
+            } else {
+                fav[where] = uniqueFavoriteIds([id], fav[where]);
+                if (e.card && typeof e.card === 'object' && e.card.id != null) {
+                    const cards = Array.isArray(fav.card) ? fav.card.slice() : [];
+                    const idx = cards.findIndex((c) => c && Number(c.id) === Number(id));
+                    if (idx >= 0) cards[idx] = { ...cards[idx], ...e.card };
+                    else cards.unshift(e.card);
+                    fav.card = cards;
+                }
+            }
+            fav.wath = uniqueFavoriteIds(fav.watch || [], fav.wath || []);
+            fav.watch = uniqueFavoriteIds(fav.wath || [], fav.watch || []);
+            return normalizeLocalFavorite(fav);
+        }
+
         try {
             if (window.Lampa && Lampa.Storage && Lampa.Storage.listener && typeof Lampa.Storage.listener.follow === 'function') {
                 Lampa.Storage.listener.follow('change', (e) => {
-                    if (!e || e.name !== 'favorite') return;
-                    if (applyingFavorite) return;
-                    if (favoritePushTimer) clearTimeout(favoritePushTimer);
-                    favoritePushTimer = setTimeout(() => {
+                    if (!e || !e.name) return;
+                    if (e.name === 'favorite') {
                         if (applyingFavorite) return;
-                        pushFavorite('storage-change').catch(() => {});
-                    }, 800);
+                        scheduleFavoritePush('storage-change');
+                        return;
+                    }
+                    // Android TV / CUB: прогресс пишется в file_view или file_view_<profile>
+                    if (String(e.name).indexOf('file_view') === 0) {
+                        onFileViewStorageChange(e);
+                    }
                 });
-                console.log('[Lampa Sync] Storage listener registered for favorite');
+                console.log('[Lampa Sync] Storage listener registered (favorite + file_view)');
             }
         } catch (e) {
-            console.warn('[Lampa Sync] favorite listener failed:', e.message || e);
+            console.warn('[Lampa Sync] Storage listener failed:', e.message || e);
+        }
+
+        // Lampa 1.8 / CUB: Favorite.listener срабатывает даже когда Storage.favorite не пишется
+        try {
+            if (window.Lampa && Lampa.Favorite && Lampa.Favorite.listener && typeof Lampa.Favorite.listener.follow === 'function') {
+                Lampa.Favorite.listener.follow('add,added', (e) => {
+                    if (applyingFavorite) return;
+                    const fav = applyFavoriteEvent('add', e);
+                    log('Favorite add/added', e && e.where, e && e.card && e.card.id);
+                    try {
+                        const cub = window.Lampa && Lampa.Account && Lampa.Account.Permit && Lampa.Account.Permit.sync;
+                        if (!cub) {
+                            applyingFavorite = true;
+                            setStorage('favorite', fav);
+                            setTimeout(() => { applyingFavorite = false; }, 500);
+                        }
+                    } catch (_) {}
+                    scheduleFavoritePush('favorite-listener-add', fav);
+                });
+                Lampa.Favorite.listener.follow('remove', (e) => {
+                    if (applyingFavorite) return;
+                    const fav = applyFavoriteEvent('remove', e);
+                    try {
+                        const cub = window.Lampa && Lampa.Account && Lampa.Account.Permit && Lampa.Account.Permit.sync;
+                        if (!cub) {
+                            applyingFavorite = true;
+                            setStorage('favorite', fav);
+                            setTimeout(() => { applyingFavorite = false; }, 500);
+                        }
+                    } catch (_) {}
+                    scheduleFavoritePush('favorite-listener-remove', fav);
+                });
+                console.log('[Lampa Sync] Favorite.listener registered');
+            }
+        } catch (e) {
+            console.warn('[Lampa Sync] Favorite.listener failed:', e.message || e);
+        }
+
+        // ---- Android TV: Timeline / внешний плеер ----
+        let timelineSaveTimer = null;
+        function resolveTmdbFromContext(extra) {
+            if (currentTmdbId) return currentTmdbId;
+            try {
+                if (window.Lampa && Lampa.Activity && typeof Lampa.Activity.active === 'function') {
+                    const a = Lampa.Activity.active() || {};
+                    const m = a.movie || a.card || a;
+                    if (m && m.id != null) return parseInt(m.id, 10) || m.id;
+                }
+            } catch (_) {}
+            if (extra) {
+                const m = extra.card || extra.movie || extra;
+                if (m && m.id != null) return parseInt(m.id, 10) || m.id;
+            }
+            return getTmdbIdFromUrl();
+        }
+
+        function saveTimelineProgress(hash, road, reason) {
+            if (!hash || !road) return;
+            const time = Number(road.time) || 0;
+            const percent = Number(road.percent) || 0;
+            if (time < getConfig().MIN_SEEK_TIME && percent < 1) return;
+
+            const tmdb = resolveTmdbFromContext();
+            if (!tmdb) {
+                console.warn('[Lampa Sync] timeline update without tmdb, hash=', hash);
+                return;
+            }
+            currentTmdbId = tmdb;
+            currentFileId = String(hash);
+            playbackSessionActive = true;
+            rememberFileMap(hash, tmdb);
+
+            // гарантируем запись в file_view (на случай если читаем другой ключ)
+            try {
+                const fvKey = fileViewStorageKey();
+                const fv = getStorage(fvKey, {}) || {};
+                const prev = fv[hash] || {};
+                fv[hash] = {
+                    ...prev,
+                    time: Math.max(Number(prev.time) || 0, time),
+                    percent: Math.max(Number(prev.percent) || 0, percent),
+                    duration: Number(road.duration) || prev.duration || 0,
+                    profile: prev.profile || 'default'
+                };
+                setStorage(fvKey, fv);
+            } catch (_) {}
+
+            if (timelineSaveTimer) clearTimeout(timelineSaveTimer);
+            timelineSaveTimer = setTimeout(() => {
+                saveProgress(tmdb, String(hash)).catch(() => {});
+                log('timeline save', reason || '', tmdb, hash, time, percent);
+            }, 800);
+        }
+
+        function onFileViewStorageChange(e) {
+            try {
+                const value = e.value && typeof e.value === 'object' ? e.value : readLocalFileView();
+                const tmdb = resolveTmdbFromContext();
+                if (!tmdb || !value) return;
+                Object.keys(value).forEach((hash) => {
+                    if (String(hash) === String(tmdb)) return;
+                    const road = value[hash];
+                    if (!road || typeof road !== 'object') return;
+                    const time = Number(road.time) || 0;
+                    const prev = lastFileViewTime[hash] || 0;
+                    if (time > prev && time >= getConfig().MIN_SEEK_TIME) {
+                        lastFileViewTime[hash] = time;
+                        lastFileViewTime[hash + '_percent'] = Number(road.percent) || 0;
+                        lastFileViewTime[hash + '_timestamp'] = Date.now();
+                        saveTimelineProgress(hash, road, 'storage-file_view');
+                    }
+                });
+            } catch (err) {
+                console.warn('[Lampa Sync] file_view change:', err.message || err);
+            }
+        }
+
+        try {
+            if (window.Lampa && Lampa.Timeline && Lampa.Timeline.listener && typeof Lampa.Timeline.listener.follow === 'function') {
+                Lampa.Timeline.listener.follow('update', (e) => {
+                    const hash = e && e.data && e.data.hash;
+                    const road = e && e.data && e.data.road;
+                    saveTimelineProgress(hash, road, 'timeline-update');
+                });
+                console.log('[Lampa Sync] Timeline.listener registered');
+            }
+        } catch (e) {
+            console.warn('[Lampa Sync] Timeline.listener failed:', e.message || e);
+        }
+
+        try {
+            if (window.Lampa && Lampa.Player && Lampa.Player.listener && typeof Lampa.Player.listener.follow === 'function') {
+                Lampa.Player.listener.follow('external', (data) => {
+                    const tmdb = resolveTmdbFromContext(data);
+                    if (tmdb) {
+                        currentTmdbId = tmdb;
+                        lastTmdbId = tmdb;
+                    }
+                    const hash = data && data.timeline && (data.timeline.hash || (data.timeline.hash === 0 ? 0 : null));
+                    const h = hash != null ? hash : (data && data.hash);
+                    if (h != null && tmdb) {
+                        currentFileId = String(h);
+                        rememberFileMap(h, tmdb);
+                        log('Player.external bound', h, '->', tmdb);
+                    }
+                    playbackSessionActive = true;
+                });
+                Lampa.Player.listener.follow('start', () => { handleStart().catch(() => {}); });
+                Lampa.Player.listener.follow('destroy', () => { handleSave().catch(() => {}); });
+                console.log('[Lampa Sync] Player.listener registered (external/start/destroy)');
+            }
+        } catch (e) {
+            console.warn('[Lampa Sync] Player.listener failed:', e.message || e);
         }
 
         // ---- Единый трекер file_view + навигации ----
-        let lastFileView = getStorage('file_view', {});
+        let lastFileView = readLocalFileView();
         if (Object.keys(lastFileViewTime).length === 0) {
             Object.keys(lastFileView).forEach((fileId) => {
                 const p = lastFileView[fileId] || {};
@@ -2056,12 +2247,17 @@
         }
 
         function trackChanges() {
-            const currentFileView = getStorage('file_view', {});
+            const currentFileView = readLocalFileView();
             const currentKeys = Object.keys(currentFileView);
             const lastKeys = Object.keys(lastFileView);
 
             // URL / TMDB
             onMovieChanged(getTmdbIdFromUrl(), 'poll');
+            // Activity.movie (на ТВ URL иногда без ?card=)
+            try {
+                const viaActivity = resolveTmdbFromContext();
+                if (viaActivity) onMovieChanged(viaActivity, 'activity');
+            } catch (_) {}
 
             // Новый file_view ключ во время текущего фильма
             if (currentKeys.length > lastKeys.length && currentTmdbId) {
@@ -2076,7 +2272,25 @@
             }
 
             currentKeys.forEach((fileId) => {
-                if (!currentTmdbId || fileId !== currentFileId) return;
+                // на ТВ currentFileId может ещё не быть — берём любой растущий hash при известном tmdb
+                if (!currentTmdbId) return;
+                if (currentFileId && fileId !== currentFileId && String(fileId) === String(currentTmdbId)) return;
+                if (currentFileId && fileId !== currentFileId) {
+                    // разрешаем переключение на hash с заметно большим time
+                    const cand = currentFileView[fileId] || {};
+                    const candTime = Number(cand.time) || 0;
+                    const curTime = currentFileId && currentFileView[currentFileId] ? (Number(currentFileView[currentFileId].time) || 0) : 0;
+                    if (!(candTime > curTime + 5)) return;
+                    currentFileId = fileId;
+                    rememberFileMap(fileId, currentTmdbId);
+                } else if (!currentFileId && String(fileId) !== String(currentTmdbId)) {
+                    const cand = currentFileView[fileId] || {};
+                    if ((Number(cand.time) || 0) >= getConfig().MIN_SEEK_TIME) {
+                        currentFileId = fileId;
+                        rememberFileMap(fileId, currentTmdbId);
+                    }
+                }
+                if (!currentFileId || fileId !== currentFileId) return;
                 const currentProgress = currentFileView[fileId] || {};
                 let currentTime = currentProgress.time || 0;
                 let currentPercent = currentProgress.percent || 0;
@@ -2088,11 +2302,12 @@
                     if (currentProgress.duration > 0) {
                         currentPercent = Math.round((currentTime / currentProgress.duration) * 100);
                     }
-                    const fv = getStorage('file_view', {});
+                    const fvKey = fileViewStorageKey();
+                    const fv = getStorage(fvKey, {}) || {};
                     if (fv[fileId]) {
                         fv[fileId].time = currentTime;
                         fv[fileId].percent = currentPercent;
-                        setStorage('file_view', fv);
+                        setStorage(fvKey, fv);
                     }
                 }
 
@@ -2139,7 +2354,16 @@
             try {
                 Lampa.Listener.follow('full', function (e) {
                     if (e && e.type === 'complite') {
-                        setTimeout(() => onMovieChanged(getTmdbIdFromUrl(), 'listener'), 300);
+                        setTimeout(() => {
+                            let id = getTmdbIdFromUrl();
+                            try {
+                                if (!id && e.object) {
+                                    const m = e.object.movie || e.object.card || e.object;
+                                    if (m && m.id != null) id = parseInt(m.id, 10) || m.id;
+                                }
+                            } catch (_) {}
+                            onMovieChanged(id || resolveTmdbFromContext(), 'listener');
+                        }, 300);
                     }
                 });
             } catch (_) {}
@@ -2168,17 +2392,23 @@
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState !== 'visible') return;
             // При возврате из внешнего плеера Lampa обновляет file_view — сохраняем
-            if (currentTmdbId && currentFileId && playbackSessionActive) {
-                handleSave();
-            } else if (currentTmdbId) {
-                const fv = getStorage('file_view', {});
-                // если file_id ещё не знали — подхватим новый ключ с выросшим time
+            if (!currentTmdbId) {
+                const via = resolveTmdbFromContext();
+                if (via) currentTmdbId = via;
+            }
+            setTimeout(() => {
+                if (currentTmdbId && currentFileId && playbackSessionActive) {
+                    handleSave();
+                    return;
+                }
+                if (!currentTmdbId) return;
+                const fv = readLocalFileView();
                 const tmdb = String(currentTmdbId);
                 let best = currentFileId;
                 let bestTime = best && fv[best] ? (fv[best].time || 0) : 0;
                 Object.keys(fv).forEach((k) => {
                     if (String(k) === tmdb) return;
-                    const t = fv[k] && fv[k].time || 0;
+                    const t = (fv[k] && fv[k].time) || 0;
                     const prev = lastFileViewTime[k] || 0;
                     if (t > prev && t > bestTime && t >= getConfig().MIN_SEEK_TIME) {
                         best = k;
@@ -2187,10 +2417,11 @@
                 });
                 if (best && bestTime > 0) {
                     currentFileId = best;
+                    rememberFileMap(best, currentTmdbId);
                     playbackSessionActive = true;
                     handleSave();
                 }
-            }
+            }, 600);
         });
 
         // Периодический save во время просмотра (реже)
