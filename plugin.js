@@ -211,7 +211,7 @@
             };
         }
 
-        let serverUrl = 'http://localhost:3000';
+        let serverUrl = '';
         let password = '';
         let urlFromStorage = null;
         let urlFromLampa = null;
@@ -238,16 +238,17 @@
             } catch (e) {}
         }
 
-        const preferLocalhost = (a, b) => {
-            const aLocal = isLocalhostUrl(a);
-            const bLocal = isLocalhostUrl(b);
-            if (!aLocal && bLocal) return a;
-            if (aLocal && !bLocal) return b;
-            return b || a || 'http://localhost:3000';
+        // Не подставляем localhost: на ТВ это «тихий» fail. Бери только явный не-localhost URL.
+        const pickUrl = (a, b) => {
+            if (a && !isLocalhostUrl(a)) return a;
+            if (b && !isLocalhostUrl(b)) return b;
+            if (a) return a;
+            if (b) return b;
+            return '';
         };
-        serverUrl = preferLocalhost(urlFromStorage, urlFromLampa) || urlFromStorage || urlFromLampa || 'http://localhost:3000';
+        serverUrl = pickUrl(urlFromStorage, urlFromLampa);
 
-        serverUrl = String(serverUrl || 'http://localhost:3000').trim();
+        serverUrl = String(serverUrl || '').trim();
         password = String(password || '').trim();
         
         return {
@@ -1149,10 +1150,21 @@
             console.warn('[Lampa Sync] Favorite.get read failed:', e.message || e);
         }
 
-        // 3) Storage / localStorage
-        let fav = getStorage('favorite', {});
+        // 3) Storage / localStorage — как в старых Lampa: default '{}' строкой
+        let fav = null;
+        try {
+            if (window.Lampa && Lampa.Storage && typeof Lampa.Storage.get === 'function') {
+                fav = Lampa.Storage.get('favorite', '{}');
+            }
+        } catch (_) {}
         if (typeof fav === 'string') {
-            try { fav = JSON.parse(fav); } catch (_) { fav = {}; }
+            try { fav = JSON.parse(fav || '{}'); } catch (_) { fav = {}; }
+        }
+        if (!fav || typeof fav !== 'object') {
+            fav = getStorage('favorite', {});
+            if (typeof fav === 'string') {
+                try { fav = JSON.parse(fav); } catch (_) { fav = {}; }
+            }
         }
         if (!fav || typeof fav !== 'object') fav = {};
         if (favoriteListLen(fav) === 0) {
@@ -1792,7 +1804,7 @@
                 name: 'Lampa Sync',
                 author: '@kotopheiop',
                 descr: 'Синхронизация прогресса, истории и закладок между устройствами',
-                version: '1.3.0'
+                version: '1.3.1'
             };
 
             const ourBase = (PLUGIN_SCRIPT_URL || '').split('?')[0];
@@ -1846,11 +1858,14 @@
         } catch (e) {}
         
         const config = getConfig();
-        console.log('[Lampa Sync] Server URL:', config.SYNC_SERVER_URL);
-        
-        // Проверяем наличие пароля
+        console.log('[Lampa Sync] Server URL:', config.SYNC_SERVER_URL || '(not set)');
+        console.log('[Lampa Sync] Lampa:', (window.Lampa && Lampa.Manifest && (Lampa.Manifest.app_version || Lampa.Manifest.version)) || (window.lampa_settings && lampa_settings.version) || 'unknown');
+
         if (!config.SYNC_PASSWORD) {
             console.warn('[Lampa Sync] SYNC_PASSWORD not configured. Please set it in Lampa settings (Настройки → Интерфейс → Синхронизация прогресса).');
+        } else if (!config.SYNC_SERVER_URL || isLocalhostUrl(config.SYNC_SERVER_URL)) {
+            console.warn('[Lampa Sync] Server URL is empty or localhost — на ТВ укажи публичный URL VPS (https://…)');
+            notifySync('Lampa Sync: укажи URL сервера (не localhost)');
         } else {
             // Проверяем доступность сервера и сразу тянем полный sync
             apiRequest('/health')
@@ -1859,26 +1874,9 @@
                     return syncAll();
                 })
                 .catch(e => {
-                    // Более информативное сообщение об ошибке
                     const errorMsg = e.message || String(e);
-                    
-                    if (errorMsg.includes('Connection refused') || errorMsg.includes('ERR_CONNECTION_REFUSED')) {
-                        console.warn('[Lampa Sync] ⚠️ Connection refused - server is not running or not accessible.');
-                        console.warn('[Lampa Sync] 💡 Solutions:');
-                        console.warn('[Lampa Sync]   1. Make sure the server is running: cd server && npm start');
-                        console.warn('[Lampa Sync]   2. Check that the server listens on 0.0.0.0 (not just localhost)');
-                        console.warn('[Lampa Sync]   3. Check Windows Firewall - port 3000 should be allowed');
-                        console.warn('[Lampa Sync]   4. Verify the server URL in settings matches your IP: http://192.168.1.193:3000');
-                    } else if (errorMsg.includes('CORS')) {
-                        console.warn('[Lampa Sync] ⚠️ CORS error - server may not be accessible from this origin.');
-                        console.warn('[Lampa Sync] 💡 Solutions:');
-                        console.warn('[Lampa Sync]   1. Use your local IP instead of localhost (e.g., http://192.168.1.193:3000)');
-                        console.warn('[Lampa Sync]   2. Make sure CORS is enabled on the server');
-                        console.warn('[Lampa Sync]   3. For production, use HTTPS with proper CORS configuration');
-                    } else {
-                        console.warn('[Lampa Sync] ⚠️ Server is not available:', errorMsg);
-                        console.warn('[Lampa Sync] Make sure the server is running and the URL is correct.');
-                    }
+                    console.warn('[Lampa Sync] ⚠️ Server is not available:', errorMsg);
+                    notifySync('Lampa Sync: сервер недоступен');
                 });
         }
 
@@ -2130,7 +2128,7 @@
                 return false;
             }
             // Для input второй аргумент — строка (не объект select-опций)
-            Lampa.Params.select('lampa_sync_server_url', '', 'http://127.0.0.1:3000');
+            Lampa.Params.select('lampa_sync_server_url', '', '');
             Lampa.Params.select('lampa_sync_password', '', '');
             console.log('[Lampa Sync] ✅ Params registered');
             return true;
@@ -2172,11 +2170,10 @@
                 const hasUrl = localStorage.getItem('lampa_sync_server_url');
                 const hasPassword = localStorage.getItem('lampa_sync_password');
                 if (!hasUrl || hasPassword === null) {
-                    const defaultUrl = 'http://127.0.0.1:3000';
                     if (!hasUrl) {
-                        localStorage.setItem('lampa_sync_server_url', defaultUrl);
+                        localStorage.setItem('lampa_sync_server_url', '');
                         if (Lampa.Storage && Lampa.Storage.set) {
-                            Lampa.Storage.set('lampa_sync_server_url', defaultUrl);
+                            Lampa.Storage.set('lampa_sync_server_url', '');
                         }
                     }
                     if (hasPassword === null) {
@@ -2192,7 +2189,7 @@
             
             const template = `
                 <div>
-                    <div class="settings-param selector" data-name="lampa_sync_server_url" data-type="input" data-string="true" placeholder="http://127.0.0.1:3000">
+                    <div class="settings-param selector" data-name="lampa_sync_server_url" data-type="input" data-string="true" placeholder="https://lampa-sync.example.com">
                         <div class="settings-param__name">URL сервера синхронизации</div>
                         <div class="settings-param__value"></div>
                     </div>
@@ -2289,7 +2286,7 @@
                     
                     // Устанавливаем значения по умолчанию, если их нет
                     if (!currentUrl) {
-                        Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                        Lampa.Storage.set('lampa_sync_server_url', '');
                     }
                     
                     if (currentPassword === null || currentPassword === undefined) {
@@ -2302,7 +2299,7 @@
                     
                     if (typeof finalUrl !== 'string') {
                         console.error('[Lampa Sync] URL is still not a string, forcing reset');
-                        Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                        Lampa.Storage.set('lampa_sync_server_url', '');
                     }
                     
                     if (typeof finalPassword !== 'string') {
@@ -2314,7 +2311,7 @@
                     console.error('[Lampa Sync] Error initializing storage values:', e);
                     // Устанавливаем значения по умолчанию в любом случае
                     try {
-                        Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                        Lampa.Storage.set('lampa_sync_server_url', '');
                         Lampa.Storage.set('lampa_sync_password', '');
                     } catch (e2) {
                         console.error('[Lampa Sync] Error setting default values:', e2);
@@ -2337,9 +2334,8 @@
                         // Если читаем наши параметры, убеждаемся, что значение правильное
                         if (key === 'lampa_sync_server_url' || key === 'lampa_sync_password') {
                             const value = originalGet.apply(this, arguments);
-                            // Если значение - не строка, возвращаем значение по умолчанию
-                            if (key === 'lampa_sync_server_url' && (typeof value !== 'string' || !value)) {
-                                return 'http://localhost:3000';
+                            if (key === 'lampa_sync_server_url' && typeof value !== 'string') {
+                                return '';
                             }
                             if (key === 'lampa_sync_password' && typeof value !== 'string') {
                                 return '';
@@ -2416,9 +2412,9 @@
                         const urlVal = localStorage.getItem('lampa_sync_server_url');
                         const pwdVal = localStorage.getItem('lampa_sync_password');
                         if (urlVal === null || typeof urlVal !== 'string') {
-                            localStorage.setItem('lampa_sync_server_url', 'http://localhost:3000');
+                            localStorage.setItem('lampa_sync_server_url', '');
                             if (Lampa.Storage && Lampa.Storage.set) {
-                                Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                                Lampa.Storage.set('lampa_sync_server_url', '');
                             }
                         }
                         if (pwdVal === null || typeof pwdVal !== 'string') {
@@ -2441,7 +2437,7 @@
                                 const cfg = getConfig();
                                 if (e.body && e.body.find) {
                                     e.body.find('[data-name="lampa_sync_server_url"] .settings-param__value')
-                                        .text(cfg.SYNC_SERVER_URL || 'http://127.0.0.1:3000');
+                                        .text(cfg.SYNC_SERVER_URL || '');
                                     e.body.find('[data-name="lampa_sync_password"] .settings-param__value')
                                         .text(cfg.SYNC_PASSWORD ? cfg.SYNC_PASSWORD : '');
                                     const deviceIdDisplay = e.body.find('#lampasync-device-id-display');
@@ -2533,7 +2529,7 @@
                                     font-size: 14px;
                                     box-sizing: border-box;
                                 "
-                                placeholder="http://localhost:3000"
+                                placeholder="https://lampa-sync.example.com"
                                 autocomplete="off"
                                 spellcheck="false"
                                 readonly="false"
@@ -2834,11 +2830,11 @@
             }
             
             // Устанавливаем значения по умолчанию
-            localStorage.setItem('lampa_sync_server_url', 'http://localhost:3000');
+            localStorage.setItem('lampa_sync_server_url', '');
             localStorage.setItem('lampa_sync_password', '');
             
             if (Lampa.Storage && Lampa.Storage.set) {
-                Lampa.Storage.set('lampa_sync_server_url', 'http://localhost:3000');
+                Lampa.Storage.set('lampa_sync_server_url', '');
                 Lampa.Storage.set('lampa_sync_password', '');
             }
             
