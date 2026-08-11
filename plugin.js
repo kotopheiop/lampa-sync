@@ -984,6 +984,7 @@
             const result = await apiRequest('/progress', 'POST', payload);
             lastPostedSnapshot = snapshot;
             lastSavedTime = Date.now();
+            rememberFileMap(fileId, tmdbId);
             console.log('[Lampa Sync] Progress saved:', Math.floor(finalTime) + 's', finalPercent + '%');
             return result;
         } catch (e) {
@@ -991,15 +992,138 @@
         }
     }
 
-    /**     /**
-     * Отправка глобального favorite на сервер (закладки / история / удаления)
+    const FAVORITE_LIST_KEYS = ['like', 'watch', 'book', 'history', 'look', 'viewed', 'scheduled', 'continued', 'thrown'];
+    const FILE_MAP_KEY = 'lampasync_file_map';
+
+    function loadFileMap() {
+        try {
+            const raw = localStorage.getItem(FILE_MAP_KEY);
+            if (!raw) return {};
+            const parsed = JSON.parse(raw);
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    function saveFileMap(map) {
+        try {
+            localStorage.setItem(FILE_MAP_KEY, JSON.stringify(map || {}));
+        } catch (_) {}
+    }
+
+    function rememberFileMap(fileId, tmdbId) {
+        if (fileId == null || tmdbId == null) return;
+        const fid = String(fileId);
+        const tid = String(tmdbId);
+        if (!fid || !tid || fid === tid) return;
+        const map = loadFileMap();
+        if (map[fid] === tid) return;
+        map[fid] = tid;
+        saveFileMap(map);
+    }
+
+    function fileViewStorageKey() {
+        try {
+            if (window.Lampa && Lampa.Timeline && typeof Lampa.Timeline.filename === 'function') {
+                return Lampa.Timeline.filename() || 'file_view';
+            }
+        } catch (_) {}
+        return 'file_view';
+    }
+
+    function readLocalFileView() {
+        const primary = getStorage(fileViewStorageKey(), {}) || {};
+        if (fileViewStorageKey() === 'file_view') return primary;
+        const fallback = getStorage('file_view', {}) || {};
+        return { ...fallback, ...primary };
+    }
+
+    function normalizeFavoriteId(x) {
+        if (x == null) return null;
+        if (typeof x === 'number' && !Number.isNaN(x)) return x;
+        if (typeof x === 'string' && /^\d+$/.test(x)) return parseInt(x, 10);
+        if (x && typeof x === 'object' && x.id != null) {
+            const n = Number(x.id);
+            return Number.isNaN(n) ? x.id : n;
+        }
+        return null;
+    }
+
+    function uniqueFavoriteIds(list, preferOrder) {
+        const out = [];
+        const seen = new Set();
+        (preferOrder || []).concat(list || []).forEach((item) => {
+            const id = normalizeFavoriteId(item);
+            if (id == null) return;
+            const key = String(id);
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push(id);
+        });
+        return out;
+    }
+
+    function favoriteListLen(fav) {
+        if (!fav) return 0;
+        return FAVORITE_LIST_KEYS.reduce((n, k) => n + ((fav[k] || []).length), 0);
+    }
+
+    /**
+     * Объединение favorite без потерь (union списков; карточки — более полные объекты).
      */
-    async function pushFavorite(reason) {
+    function mergeFavoriteUnion(localFav, serverFav) {
+        const a = localFav || {};
+        const b = serverFav || {};
+        const next = { ...a };
+        FAVORITE_LIST_KEYS.forEach((key) => {
+            // локальный порядок важнее, затем уникальные с сервера
+            next[key] = uniqueFavoriteIds(b[key] || [], a[key] || []);
+        });
+        const cardById = new Map();
+        const absorbCard = (item) => {
+            if (item == null) return;
+            if (typeof item === 'number' || (typeof item === 'string' && /^\d+$/.test(item))) {
+                const id = normalizeFavoriteId(item);
+                if (id == null || cardById.has(Number(id) || id)) return;
+                cardById.set(Number(id) || id, { id: Number(id) || id, source: 'tmdb' });
+                return;
+            }
+            if (typeof item !== 'object' || item.id == null) return;
+            const id = Number(item.id) || item.id;
+            const prev = cardById.get(id);
+            if (!prev) {
+                cardById.set(id, item);
+                return;
+            }
+            const prevScore = (prev.title || prev.name ? 2 : 0) + (prev.poster_path ? 1 : 0);
+            const nextScore = (item.title || item.name ? 2 : 0) + (item.poster_path ? 1 : 0);
+            if (nextScore > prevScore) cardById.set(id, { ...prev, ...item });
+            else cardById.set(id, { ...item, ...prev });
+        };
+        (a.card || []).forEach(absorbCard);
+        (b.card || []).forEach(absorbCard);
+        const needed = new Set([
+            ...next.history, ...next.book, ...next.like, ...next.watch,
+            ...next.look, ...next.viewed, ...next.scheduled, ...next.continued, ...next.thrown
+        ].map((x) => Number(x) || x));
+        cardById.forEach((_v, id) => needed.add(id));
+        next.card = [...needed].map((id) => cardById.get(id) || { id, source: 'tmdb' });
+        return next;
+    }
+
+    /**
+     * Отправка глобального favorite на сервер.
+     * mode: 'replace' (удаления) | 'merge' (union на сервере, без потерь)
+     */
+    async function pushFavorite(reason, opts) {
         try {
             const config = getConfig();
             if (!config.SYNC_PASSWORD) return null;
+            const mode = (opts && opts.mode) || 'replace';
             const favorite = getStorage('favorite', {});
             const payload = {
+                mode: mode,
                 favorite: {
                     card: (favorite.card || []).map((c) => (c && typeof c === 'object' && c.id != null ? c.id : c)),
                     like: favorite.like || [],
@@ -1016,13 +1140,123 @@
             const data = await apiRequest('/favorite', 'POST', payload);
             if (data && data.success) {
                 try { localStorage.setItem('lampasync_favorite_pushed_at', data.updated || new Date().toISOString()); } catch (_) {}
-                log('favorite pushed:', reason || '', data.history, data.book);
+                log('favorite pushed:', reason || '', mode, data.history, data.book);
             }
             return data;
         } catch (e) {
             console.warn('[Lampa Sync] pushFavorite error:', e.message || e);
             return null;
         }
+    }
+
+    function buildHashToTmdb(cards) {
+        const out = {};
+        if (!window.Lampa || !Lampa.Utils || typeof Lampa.Utils.hash !== 'function') return out;
+        (cards || []).forEach((card) => {
+            if (!card || card.id == null) return;
+            const tid = String(card.id);
+            try {
+                if (card.original_title) {
+                    out[String(Lampa.Utils.hash(card.original_title))] = tid;
+                }
+                if (card.title && card.title !== card.original_title) {
+                    out[String(Lampa.Utils.hash(card.title))] = tid;
+                }
+                const seriesName = card.original_name || card.name;
+                if (seriesName) {
+                    out[String(Lampa.Utils.hash(seriesName))] = tid;
+                    // ограниченный перебор эпизодов — только чтобы сопоставить уже существующие hash в file_view
+                    for (let s = 1; s <= 2; s++) {
+                        for (let e = 1; e <= 24; e++) {
+                            out[String(Lampa.Utils.hash([s, s > 10 ? ':' : '', e, seriesName].join('')))] = tid;
+                            out[String(Lampa.Utils.hash([s, e, seriesName].join('')))] = tid;
+                        }
+                    }
+                }
+            } catch (_) {}
+        });
+        return out;
+    }
+
+    /**
+     * Выгрузка локального file_view на сервер (только с известным tmdb, max-merge).
+     */
+    async function pushLocalProgress(progressMap, cards) {
+        const config = getConfig();
+        const fileView = readLocalFileView();
+        const fmap = loadFileMap();
+        const hashMap = buildHashToTmdb(cards);
+
+        Object.keys(progressMap || {}).forEach((tmdb) => {
+            const mapping = (progressMap[tmdb] && progressMap[tmdb].file_mapping) || {};
+            Object.keys(mapping).forEach((fid) => {
+                if (String(mapping[fid]) === String(tmdb)) fmap[String(fid)] = String(tmdb);
+            });
+        });
+
+        let uploaded = 0;
+        let skipped = 0;
+        let unknown = 0;
+
+        const entries = Object.keys(fileView);
+        for (let i = 0; i < entries.length; i++) {
+            const fileId = entries[i];
+            const rec = fileView[fileId];
+            if (!rec || typeof rec !== 'object') continue;
+
+            const time = Number(rec.time) || 0;
+            const percent = Number(rec.percent) || 0;
+            if (time < config.MIN_SEEK_TIME) {
+                skipped++;
+                continue;
+            }
+            if (percent >= config.REMOVE_AT_PERCENT) {
+                skipped++;
+                continue;
+            }
+
+            const tmdb = fmap[String(fileId)] || hashMap[String(fileId)] || null;
+            if (!tmdb || String(fileId) === String(tmdb)) {
+                unknown++;
+                continue;
+            }
+
+            const serverRec = (progressMap || {})[String(tmdb)] || (progressMap || {})[tmdb];
+            const serverTime = serverRec ? (Number(serverRec.time) || 0) : 0;
+            const serverPercent = serverRec ? (Number(serverRec.percent) || 0) : 0;
+            if (time <= serverTime && percent <= serverPercent) {
+                skipped++;
+                rememberFileMap(fileId, tmdb);
+                continue;
+            }
+
+            try {
+                await apiRequest('/progress', 'POST', {
+                    tmdb: tmdb,
+                    time: time,
+                    percent: percent,
+                    file_id: fileId,
+                    // _seed → на сервере max с другим device (не затрём больший чужой прогресс)
+                    device_id: getDeviceId() + '_seed'
+                });
+                fmap[String(fileId)] = String(tmdb);
+                uploaded++;
+                progressMap[String(tmdb)] = {
+                    ...(serverRec || {}),
+                    time: Math.max(serverTime, time),
+                    percent: Math.max(serverPercent, percent),
+                    file_mapping: {
+                        ...((serverRec && serverRec.file_mapping) || {}),
+                        [String(fileId)]: tmdb
+                    }
+                };
+            } catch (e) {
+                console.warn('[Lampa Sync] seed progress failed', fileId, e.message || e);
+            }
+        }
+
+        saveFileMap(fmap);
+        return { uploaded, skipped, unknown };
     }
 
     /**
@@ -1135,7 +1369,7 @@
     }
 
     /**
-     * Полная синхронизация со сервера: favorite + max-прогресс в file_view
+     * Полная синхронизация: merge favorite + max progress туда-обратно (без потерь).
      */
     async function syncAll() {
         try {
@@ -1152,50 +1386,41 @@
                 return null;
             }
 
-            // 1) Favorite
-            // Правило: пустое устройство всегда тянет сервер;
-            // иначе last-write-wins по updated (чтобы удаления не возвращались).
-            let mergedFavorite = null;
-            if (data.favorite) {
-                let localPushed = null;
-                try { localPushed = localStorage.getItem('lampasync_favorite_pushed_at'); } catch (_) {}
-                const serverUpdated = data.favorite_updated || data.favorite.updated || null;
-                const localFav = getStorage('favorite', {}) || {};
-                const localHistLen = (localFav.history || []).length;
-                const serverHistLen = (data.favorite.history || []).length;
-                const localEmpty = localHistLen === 0 && (localFav.book || []).length === 0;
-                const serverIsNewer = !!(serverUpdated && (!localPushed || new Date(serverUpdated) >= new Date(localPushed)));
-                const shouldPull = localEmpty || serverIsNewer || (serverHistLen > 0 && localHistLen === 0);
+            // 1) Favorite — union локального и сервера (пустое не затирает полное)
+            let mergedFavorite = getStorage('favorite', {}) || {};
+            const serverFav = data.favorite || null;
+            if (serverFav) {
+                const localFav = mergedFavorite;
+                const localEmpty = favoriteListLen(localFav) === 0;
+                const serverEmpty = favoriteListLen(serverFav) === 0;
 
-                if (shouldPull) {
-                    mergedFavorite = applyFavoriteFromServer(data.favorite);
-                    try {
-                        localStorage.setItem(
-                            'lampasync_favorite_pushed_at',
-                            serverUpdated || new Date().toISOString()
-                        );
-                    } catch (_) {}
-                    console.log('[Lampa Sync] favorite pulled from server:', {
-                        history: (mergedFavorite.history || []).length,
-                        book: (mergedFavorite.book || []).length,
-                        reason: localEmpty ? 'local-empty' : 'server-newer'
-                    });
-                    // Дождаться названий — иначе история на новом устройстве пустая/без постеров
-                    try {
-                        mergedFavorite = await enrichStubCards(mergedFavorite);
-                    } catch (_) {}
-                } else {
-                    await pushFavorite('syncAll-local-newer');
+                if (localEmpty && !serverEmpty) {
+                    mergedFavorite = applyFavoriteFromServer(serverFav);
+                    console.log('[Lampa Sync] favorite pulled (local empty)');
+                } else if (!localEmpty && serverEmpty) {
+                    await pushFavorite('syncAll-seed', { mode: 'merge' });
                     mergedFavorite = getStorage('favorite', {});
-                    console.log('[Lampa Sync] favorite kept local & pushed');
+                    console.log('[Lampa Sync] favorite seeded to empty server');
+                } else if (!localEmpty && !serverEmpty) {
+                    mergedFavorite = mergeFavoriteUnion(localFav, serverFav);
+                    applyingFavorite = true;
+                    setStorage('favorite', mergedFavorite);
+                    setTimeout(() => { applyingFavorite = false; }, 1200);
+                    await pushFavorite('syncAll-merge', { mode: 'merge' });
+                    console.log('[Lampa Sync] favorite merged & pushed:', {
+                        history: (mergedFavorite.history || []).length,
+                        book: (mergedFavorite.book || []).length
+                    });
                 }
+                try {
+                    mergedFavorite = await enrichStubCards(getStorage('favorite', {}) || mergedFavorite);
+                } catch (_) {}
             }
 
-            // 2) Применяем max-прогресс в file_view
-            // Один file_id не должен получать прогресс от разных tmdb
-            // (в тестовых данных часто один и тот же file_id на все записи).
+            // 2) Сервер → локальный file_view (max)
             const progressMap = data.progress || {};
-            const fileView = getStorage('file_view', {});
+            const fvKey = fileViewStorageKey();
+            const fileView = getStorage(fvKey, {}) || {};
             let applied = 0;
 
             const owners = {};
@@ -1205,6 +1430,7 @@
                     if (String(mapping[fid]) !== String(tmdb)) return;
                     if (!owners[fid]) owners[fid] = [];
                     owners[fid].push(tmdb);
+                    rememberFileMap(fid, tmdb);
                 });
             });
 
@@ -1214,9 +1440,7 @@
 
                 const mapping = rec.file_mapping || {};
                 let fileIds = Object.keys(mapping).filter((fid) => String(mapping[fid]) === String(tmdb));
-                // общий file_id на несколько tmdb — не трогаем чужой file_view
                 fileIds = fileIds.filter((fid) => (owners[fid] || []).length <= 1);
-                // Не пишем file_view[tmdb] — это загрязняет маппинг. Без реального file_id — пропускаем.
                 if (!fileIds.length) return;
 
                 fileIds.forEach((fileId) => {
@@ -1246,10 +1470,19 @@
             });
 
             if (applied > 0) {
-                setStorage('file_view', fileView);
+                setStorage(fvKey, fileView);
             }
 
-            // Перечитываем favorite в памяти Lampa (после apply + enrich)
+            // 3) Локальный file_view → сервер (только с известным tmdb, без понижения)
+            const cards = (mergedFavorite && mergedFavorite.card) || (getStorage('favorite', {}) || {}).card || [];
+            let seed = { uploaded: 0, skipped: 0, unknown: 0 };
+            try {
+                seed = await pushLocalProgress(progressMap, cards);
+                console.log('[Lampa Sync] local progress seeded:', seed);
+            } catch (e) {
+                console.warn('[Lampa Sync] pushLocalProgress:', e.message || e);
+            }
+
             try {
                 if (window.Lampa && Lampa.Favorite) {
                     if (typeof Lampa.Favorite.read === 'function') Lampa.Favorite.read();
@@ -1258,12 +1491,17 @@
                 if (window.Lampa && Lampa.Listener && typeof Lampa.Listener.send === 'function') {
                     Lampa.Listener.send('state:changed', { target: 'favorite', reason: 'sync' });
                 }
+                if (window.Lampa && Lampa.Timeline && typeof Lampa.Timeline.read === 'function') {
+                    Lampa.Timeline.read();
+                }
             } catch (_) {}
 
             console.log('[Lampa Sync] ✅ Full sync done:', {
                 records: data.records,
-                history: data.history,
-                fileViewApplied: applied
+                history: (mergedFavorite && mergedFavorite.history || []).length,
+                fileViewApplied: applied,
+                seeded: seed.uploaded,
+                seedUnknown: seed.unknown
             });
 
             return data;
@@ -1582,6 +1820,7 @@
                 if (real) {
                     currentFileId = real;
                     log('Bound file_id', currentFileId, '->', currentTmdbId);
+                    rememberFileMap(currentFileId, currentTmdbId);
                     // не ставим playbackSessionActive здесь — только после роста time
                 }
             }
@@ -2508,6 +2747,10 @@
         saveProgress: saveProgress,
         syncAll: syncAll,
         pushFavorite: pushFavorite,
+        pushLocalProgress: function () {
+            const fav = getStorage('favorite', {}) || {};
+            return pushLocalProgress({}, fav.card || []);
+        },
         getTmdbIdFromUrl: getTmdbIdFromUrl,
         getCurrentFileId: getCurrentFileId,
         getConfig: getConfig,
