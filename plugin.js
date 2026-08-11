@@ -1346,8 +1346,25 @@
      * Кнопка «Обновить» в шапке рядом с поиском / уведомлениями
      */
     function addHeadSyncButton() {
-        if (window._lampaSyncHeadBtn) return true;
         if (!window.Lampa || !Lampa.Head || typeof Lampa.Head.addIcon !== 'function') return false;
+
+        try {
+            const head = typeof Lampa.Head.render === 'function' ? Lampa.Head.render() : null;
+            if (head && head.find) {
+                const existing = head.find('.open--lampasync');
+                if (existing && existing.length) {
+                    // Убираем дубли (hot-reload / повторный init)
+                    if (existing.length > 1) {
+                        existing.slice(1).remove();
+                        console.log('[Lampa Sync] Removed duplicate head sync buttons:', existing.length - 1);
+                    }
+                    window._lampaSyncHeadBtn = true;
+                    return true;
+                }
+            }
+        } catch (_) {}
+
+        if (window._lampaSyncHeadBtn) return true;
 
         // Иконка обновления (круговые стрелки)
         const svg = '<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">' +
