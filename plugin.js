@@ -1070,6 +1070,109 @@
         return FAVORITE_LIST_KEYS.reduce((n, k) => n + ((fav[k] || []).length), 0);
     }
 
+    function emptyFavoriteObject() {
+        const out = { card: [] };
+        FAVORITE_LIST_KEYS.forEach((k) => { out[k] = []; });
+        return out;
+    }
+
+    function normalizeLocalFavorite(fav) {
+        const src = fav && typeof fav === 'object' ? fav : {};
+        const next = emptyFavoriteObject();
+        FAVORITE_LIST_KEYS.forEach((key) => {
+            next[key] = uniqueFavoriteIds(src[key] || []);
+        });
+        next.wath = uniqueFavoriteIds(src.watch || [], src.wath || []);
+        next.watch = uniqueFavoriteIds(src.wath || [], src.watch || []);
+        const cardById = new Map();
+        (src.card || []).forEach((item) => {
+            if (item && typeof item === 'object' && item.id != null) {
+                cardById.set(Number(item.id) || item.id, item);
+            } else {
+                const id = normalizeFavoriteId(item);
+                if (id != null) cardById.set(Number(id) || id, { id: Number(id) || id, source: 'tmdb' });
+            }
+        });
+        const needed = new Set([
+            ...next.history, ...next.book, ...next.like, ...next.wath, ...next.watch,
+            ...next.look, ...next.viewed, ...next.scheduled, ...next.continued, ...next.thrown
+        ].map((x) => Number(x) || x));
+        cardById.forEach((_v, id) => needed.add(id));
+        next.card = [...needed].map((id) => cardById.get(id) || { id, source: 'tmdb' });
+        return next;
+    }
+
+    /**
+     * Реальное локальное избранное: Favorite.full / Favorite.get (CUB) / Storage.
+     * На ТВ с CUB Storage.get('favorite') часто пустой — UI берёт закладки из Account.
+     */
+    function readLocalFavorite() {
+        // 1) In-memory Lampa.Favorite (без CUB)
+        try {
+            if (window.Lampa && Lampa.Favorite && typeof Lampa.Favorite.full === 'function') {
+                const full = Lampa.Favorite.full();
+                if (full && favoriteListLen(full) > 0) {
+                    return normalizeLocalFavorite(full);
+                }
+            }
+        } catch (_) {}
+
+        // 2) По типам — работает и с CUB (Account.Bookmarks)
+        try {
+            if (window.Lampa && Lampa.Favorite && typeof Lampa.Favorite.get === 'function') {
+                const out = emptyFavoriteObject();
+                const cardById = new Map();
+                const types = ['like', 'wath', 'book', 'history', 'look', 'viewed', 'scheduled', 'continued', 'thrown'];
+                types.forEach((type) => {
+                    let cards = [];
+                    try { cards = Lampa.Favorite.get({ type: type }) || []; } catch (_) { cards = []; }
+                    if (!Array.isArray(cards)) cards = [];
+                    out[type] = cards.map((c) => normalizeFavoriteId(c)).filter((x) => x != null);
+                    cards.forEach((c) => {
+                        if (c && typeof c === 'object' && c.id != null) {
+                            cardById.set(Number(c.id) || c.id, c);
+                        }
+                    });
+                });
+                out.watch = out.wath.slice();
+                out.card = [...cardById.values()];
+                if (favoriteListLen(out) > 0) {
+                    console.log('[Lampa Sync] readLocalFavorite via Favorite.get:', {
+                        history: out.history.length,
+                        book: out.book.length,
+                        cards: out.card.length
+                    });
+                    return normalizeLocalFavorite(out);
+                }
+            }
+        } catch (e) {
+            console.warn('[Lampa Sync] Favorite.get read failed:', e.message || e);
+        }
+
+        // 3) Storage / localStorage
+        let fav = getStorage('favorite', {});
+        if (typeof fav === 'string') {
+            try { fav = JSON.parse(fav); } catch (_) { fav = {}; }
+        }
+        if (!fav || typeof fav !== 'object') fav = {};
+        if (favoriteListLen(fav) === 0) {
+            try {
+                const raw = localStorage.getItem('favorite');
+                if (raw) fav = JSON.parse(raw);
+            } catch (_) {}
+        }
+        return normalizeLocalFavorite(fav || {});
+    }
+
+    function notifySync(msg) {
+        try {
+            if (window.Lampa && Lampa.Noty && typeof Lampa.Noty.show === 'function') {
+                Lampa.Noty.show(msg);
+            }
+        } catch (_) {}
+        console.log('[Lampa Sync]', msg);
+    }
+
     /**
      * Объединение favorite без потерь (union списков; карточки — более полные объекты).
      */
@@ -1081,6 +1184,8 @@
             // локальный порядок важнее, затем уникальные с сервера
             next[key] = uniqueFavoriteIds(b[key] || [], a[key] || []);
         });
+        next.wath = uniqueFavoriteIds(next.watch || [], next.wath || []);
+        next.watch = uniqueFavoriteIds(next.wath || [], next.watch || []);
         const cardById = new Map();
         const absorbCard = (item) => {
             if (item == null) return;
@@ -1105,7 +1210,7 @@
         (a.card || []).forEach(absorbCard);
         (b.card || []).forEach(absorbCard);
         const needed = new Set([
-            ...next.history, ...next.book, ...next.like, ...next.watch,
+            ...next.history, ...next.book, ...next.like, ...next.wath, ...next.watch,
             ...next.look, ...next.viewed, ...next.scheduled, ...next.continued, ...next.thrown
         ].map((x) => Number(x) || x));
         cardById.forEach((_v, id) => needed.add(id));
@@ -1122,13 +1227,12 @@
             const config = getConfig();
             if (!config.SYNC_PASSWORD) return null;
             const mode = (opts && opts.mode) || 'replace';
-            const favorite = getStorage('favorite', {});
+            const favorite = (opts && opts.favorite) || readLocalFavorite();
             const payload = {
                 mode: mode,
                 favorite: {
                     card: (favorite.card || []).map((c) => (c && typeof c === 'object' && c.id != null ? c.id : c)),
                     like: favorite.like || [],
-                    // Lampa: wath; сервер/старые клиенты: watch — шлём объединение
                     watch: uniqueFavoriteIds(favorite.watch || [], favorite.wath || []),
                     wath: uniqueFavoriteIds(favorite.wath || [], favorite.watch || []),
                     book: favorite.book || [],
@@ -1396,32 +1500,34 @@
                 return null;
             }
 
-            // 1) Favorite — union локального и сервера (пустое не затирает полное)
-            let mergedFavorite = getStorage('favorite', {}) || {};
-            const serverFav = data.favorite || null;
-            if (serverFav) {
-                const localFav = mergedFavorite;
-                const localEmpty = favoriteListLen(localFav) === 0;
-                const serverEmpty = favoriteListLen(serverFav) === 0;
+            // 1) Favorite — всегда читаем реальное локальное (CUB/Favorite API), merge + push
+            const serverFav = data.favorite || emptyFavoriteObject();
+            const localFav = readLocalFavorite();
+            let mergedFavorite = mergeFavoriteUnion(localFav, serverFav);
 
-                if (localEmpty && !serverEmpty) {
-                    mergedFavorite = applyFavoriteFromServer(serverFav);
-                    console.log('[Lampa Sync] favorite pulled (local empty)');
-                } else if (!localEmpty && serverEmpty) {
-                    await pushFavorite('syncAll-seed', { mode: 'merge' });
-                    mergedFavorite = getStorage('favorite', {});
-                    console.log('[Lampa Sync] favorite seeded to empty server');
-                } else if (!localEmpty && !serverEmpty) {
-                    mergedFavorite = mergeFavoriteUnion(localFav, serverFav);
-                    applyingFavorite = true;
-                    setStorage('favorite', mergedFavorite);
-                    setTimeout(() => { applyingFavorite = false; }, 1200);
-                    await pushFavorite('syncAll-merge', { mode: 'merge' });
-                    console.log('[Lampa Sync] favorite merged & pushed:', {
-                        history: (mergedFavorite.history || []).length,
-                        book: (mergedFavorite.book || []).length
-                    });
+            console.log('[Lampa Sync] favorite sync:', {
+                localHistory: (localFav.history || []).length,
+                localBook: (localFav.book || []).length,
+                serverHistory: (serverFav.history || []).length,
+                serverBook: (serverFav.book || []).length,
+                mergedHistory: (mergedFavorite.history || []).length
+            });
+
+            if (favoriteListLen(localFav) > 0 || favoriteListLen(serverFav) > 0) {
+                applyingFavorite = true;
+                setStorage('favorite', mergedFavorite);
+                setTimeout(() => { applyingFavorite = false; }, 1200);
+
+                const pushed = await pushFavorite('syncAll-merge', {
+                    mode: 'merge',
+                    favorite: mergedFavorite
+                });
+                if (pushed && pushed.success) {
+                    notifySync('Синк: история ' + (pushed.history || 0) + ', закладки ' + (pushed.book || 0));
+                } else if (favoriteListLen(localFav) > 0) {
+                    notifySync('Синк избранного не удался — проверь URL/пароль');
                 }
+
                 try {
                     mergedFavorite = await enrichStubCards(getStorage('favorite', {}) || mergedFavorite);
                 } catch (_) {}
@@ -1686,7 +1792,7 @@
                 name: 'Lampa Sync',
                 author: '@kotopheiop',
                 descr: 'Синхронизация прогресса, истории и закладок между устройствами',
-                version: '1.2.0'
+                version: '1.3.0'
             };
 
             const ourBase = (PLUGIN_SCRIPT_URL || '').split('?')[0];
@@ -2757,8 +2863,9 @@
         saveProgress: saveProgress,
         syncAll: syncAll,
         pushFavorite: pushFavorite,
+        readLocalFavorite: readLocalFavorite,
         pushLocalProgress: function () {
-            const fav = getStorage('favorite', {}) || {};
+            const fav = readLocalFavorite();
             return pushLocalProgress({}, fav.card || []);
         },
         getTmdbIdFromUrl: getTmdbIdFromUrl,
