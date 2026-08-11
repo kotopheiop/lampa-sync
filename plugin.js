@@ -1508,18 +1508,25 @@
             }
 
             const isTitle = titleHashSet.has(String(fileId));
+            const at = Number(rec._ls_at) || Number(lastFileViewTime[fileId + '_timestamp']) || 0;
+            const cand = { fileId, time, percent, isTitle, at };
             const prev = bestByTmdb[String(tmdb)];
             if (!prev) {
-                bestByTmdb[String(tmdb)] = { fileId, time, percent, isTitle };
+                bestByTmdb[String(tmdb)] = cand;
                 return;
             }
-            // title-hash важнее «угаданных» эпизодных ключей (они раздували time)
+            // Свежий прогресс (перемотка/просмотр) важнее старого раздутого title-hash
+            if (at > prev.at + 1000) {
+                bestByTmdb[String(tmdb)] = cand;
+                return;
+            }
+            if (prev.at > at + 1000) return;
             if (isTitle && !prev.isTitle) {
-                bestByTmdb[String(tmdb)] = { fileId, time, percent, isTitle };
+                bestByTmdb[String(tmdb)] = cand;
                 return;
             }
             if (isTitle === prev.isTitle && (time > prev.time || percent > prev.percent)) {
-                bestByTmdb[String(tmdb)] = { fileId, time, percent, isTitle };
+                bestByTmdb[String(tmdb)] = cand;
             }
         });
 
@@ -1969,7 +1976,7 @@
                 name: 'Lampa Sync',
                 author: '@kotopheiop',
                 descr: 'Синхронизация прогресса, истории и закладок между устройствами',
-                version: '1.4.1'
+                version: '1.4.2'
             };
 
             const ourBase = (PLUGIN_SCRIPT_URL || '').split('?')[0];
@@ -2180,12 +2187,15 @@
                 const fvKey = fileViewStorageKey();
                 const fv = getStorage(fvKey, {}) || {};
                 const prev = fv[hash] || {};
+                // Перемотка может идти вниз — доверяем Timeline, не Math.max
+                // (иначе раздутый time навсегда блокирует реальный прогресс).
                 fv[hash] = {
                     ...prev,
-                    time: Math.max(Number(prev.time) || 0, time),
-                    percent: Math.max(Number(prev.percent) || 0, percent),
+                    time: time,
+                    percent: percent,
                     duration: Number(road.duration) || prev.duration || 0,
-                    profile: prev.profile || 'default'
+                    profile: prev.profile || 'default',
+                    _ls_at: Date.now()
                 };
                 setStorage(fvKey, fv);
             } catch (_) {}
