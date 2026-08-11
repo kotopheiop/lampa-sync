@@ -10,11 +10,9 @@
 https://kotopheiop.github.io/lampa-sync/plugin.js
 ```
 
-Либо с своего сервера: `http://<IP-сервера>:3000/plugin.js`
-
 ## Настройка
 
-1. Подними сервер: [lampa-sync-server](https://github.com/kotopheiop/lampa-sync-server)
+1. Подними сервер: [lampa-sync-server](https://github.com/kotopheiop/lampa-sync-server) (отдельный репозиторий)
 2. В Lampa: **Настройки → Интерфейс → Синхронизация прогресса**
    - **URL сервера** — например `http://192.168.1.10:3000`
    - **Пароль** — тот же, что `SYNC_PASSWORD` в `.env` сервера
