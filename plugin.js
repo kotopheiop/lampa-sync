@@ -1,8 +1,9 @@
 /**
  * Lampa Sync Plugin
- * @author kotopheiop
- * @name Синхронизация прогресса просмотра
- * @description Синхронизация прогресса просмотра и избранного между устройствами через сервер
+ * @author @kotopheiop
+ * @name Lampa Sync
+ * @description Синхронизация прогресса, истории и закладок между устройствами
+ * @version 1.2.0
  */
 
 (function() {
@@ -11,6 +12,21 @@
     // Проверка на дублирование плагина
     if (window.lampasyncplugin) return;
     window.lampasyncplugin = true;
+
+    // URL этого скрипта — для обновления карточки в списке расширений
+    const PLUGIN_SCRIPT_URL = (function () {
+        try {
+            if (document.currentScript && document.currentScript.src) {
+                return String(document.currentScript.src).split('?')[0];
+            }
+        } catch (_) {}
+        try {
+            const scripts = Array.from(document.querySelectorAll('script[src]') || []);
+            const mine = scripts.find((s) => /lampa-sync|\/plugin\.js/i.test(s.src || ''));
+            return mine ? String(mine.src).split('?')[0] : '';
+        } catch (_) {}
+        return '';
+    })();
     // КРИТИЧНО: Очищаем некорректные значения в localStorage ДО инициализации
     // Это исправляет проблему, когда URL сохранился как ключ
     try {
@@ -1327,12 +1343,126 @@
     // ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
     /**
+     * Кнопка «Обновить» в шапке рядом с поиском / уведомлениями
+     */
+    function addHeadSyncButton() {
+        if (window._lampaSyncHeadBtn) return true;
+        if (!window.Lampa || !Lampa.Head || typeof Lampa.Head.addIcon !== 'function') return false;
+
+        // Иконка обновления (круговые стрелки)
+        const svg = '<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">' +
+            '<path d="M17.65 6.35A7.95 7.95 0 0 0 12 4V1L7 6l5 5V7c2.76 0 5 2.24 5 5a5 5 0 0 1-8.9 3.1L6.7 16.5A7 7 0 0 0 19 12c0-1.93-.78-3.68-2.05-4.95zM6 12c0-2.76 2.24-5 5-5v4l5-5-5-5v3c-3.87 0-7 3.13-7 7 0 1.93.78 3.68 2.05 4.95l1.45-1.45A4.98 4.98 0 0 1 6 12z"/>' +
+            '</svg>';
+
+        let syncing = false;
+        const btn = Lampa.Head.addIcon(svg, function () {
+            if (syncing) return;
+            const config = getConfig();
+            if (!config.SYNC_PASSWORD) {
+                try {
+                    if (Lampa.Noty) Lampa.Noty.show('Укажите пароль синхронизации в настройках', { time: 3000 });
+                } catch (_) {}
+                return;
+            }
+
+            syncing = true;
+            try { if (btn && btn.addClass) btn.addClass('active'); } catch (_) {}
+            try {
+                if (Lampa.Noty) Lampa.Noty.show('Синхронизация…', { time: 1500 });
+            } catch (_) {}
+
+            syncAll()
+                .then((data) => {
+                    const hist = data && data.history != null ? data.history : '?';
+                    const rec = data && data.records != null ? data.records : '?';
+                    const msg = data && data.ok
+                        ? ('Готово · история: ' + hist + ' · прогресс: ' + rec)
+                        : 'Синхронизация не удалась';
+                    try { if (Lampa.Noty) Lampa.Noty.show(msg, { time: 3000 }); } catch (_) {}
+                })
+                .catch((e) => {
+                    const msg = (e && e.message) ? String(e.message).slice(0, 80) : 'Ошибка синхронизации';
+                    try { if (Lampa.Noty) Lampa.Noty.show(msg, { time: 4000 }); } catch (_) {}
+                })
+                .finally(() => {
+                    syncing = false;
+                    try { if (btn && btn.removeClass) btn.removeClass('active'); } catch (_) {}
+                });
+        });
+
+        try {
+            if (btn && btn.addClass) btn.addClass('open--lampasync');
+            // Ставим рядом с поиском (после него), иначе оставляем в head__actions
+            const head = typeof Lampa.Head.render === 'function' ? Lampa.Head.render() : null;
+            if (head && btn) {
+                const search = head.find ? head.find('.open--search') : null;
+                if (search && search.length) {
+                    btn.insertAfter(search);
+                }
+            }
+            // Подсказка для мыши / long-press где поддерживается
+            if (btn && btn.attr) btn.attr('title', 'Синхронизация прогресса');
+        } catch (_) {}
+
+        window._lampaSyncHeadBtn = true;
+        console.log('[Lampa Sync] Head sync button added');
+        return true;
+    }
+
+    /**
+     * Карточка в списке расширений: author/name/descr
+     * (без author Lampa показывает дефолт @lampa)
+     */
+    function updatePluginCard() {
+        try {
+            if (!window.Lampa || !Lampa.Plugins || typeof Lampa.Plugins.get !== 'function') return false;
+
+            const META = {
+                name: 'Lampa Sync',
+                author: '@kotopheiop',
+                descr: 'Синхронизация прогресса, истории и закладок между устройствами',
+                version: '1.2.0'
+            };
+
+            const ourBase = (PLUGIN_SCRIPT_URL || '').split('?')[0];
+            const list = Lampa.Plugins.get() || [];
+            let changed = false;
+
+            list.forEach((plug) => {
+                if (!plug || !plug.url) return;
+                const plugBase = String(plug.url).split('?')[0];
+                const isOurs = (ourBase && (plugBase === ourBase || ourBase.indexOf(plugBase) === 0 || plugBase.indexOf(ourBase) === 0))
+                    || /lampa-sync/i.test(plugBase)
+                    || (plug.name && /^lampa\s*sync$/i.test(String(plug.name).trim()));
+
+                if (!isOurs) return;
+
+                if (plug.author !== META.author) { plug.author = META.author; changed = true; }
+                if (plug.name !== META.name) { plug.name = META.name; changed = true; }
+                if (plug.descr !== META.descr) { plug.descr = META.descr; changed = true; }
+                if (plug.version !== META.version) { plug.version = META.version; changed = true; }
+            });
+
+            if (changed && typeof Lampa.Plugins.save === 'function') {
+                Lampa.Plugins.save();
+                console.log('[Lampa Sync] Plugin card updated:', META);
+            }
+            return true;
+        } catch (e) {
+            console.warn('[Lampa Sync] updatePluginCard failed:', e.message || e);
+            return false;
+        }
+    }
+
+    /**
      * Инициализация плагина
      */
     function startPlugin() {
         if (window._lampaSyncStarted) return;
         window._lampaSyncStarted = true;
         console.log('[Lampa Sync] Plugin initialized by @kotopheiop');
+
+        updatePluginCard();
         
         // Если в localStorage уже сохранён не-localhost URL и пароль — фиксируем их, чтобы запросы не уходили на localhost
         try {
@@ -1566,6 +1696,15 @@
             if (!p || !(p.time >= getConfig().MIN_SEEK_TIME)) return;
             saveProgress(currentTmdbId, currentFileId).catch(() => {});
         }, 30000);
+
+        // Кнопка sync в шапке (рядом с поиском)
+        if (!addHeadSyncButton()) {
+            let tries = 0;
+            const t = setInterval(() => {
+                tries++;
+                if (addHeadSyncButton() || tries > 20) clearInterval(t);
+            }, 500);
+        }
     }
 
     // ==================== НАСТРОЙКИ LAMPA ====================
