@@ -531,98 +531,59 @@
             console.log('[Lampa Sync] Progress loaded:', data);
 
             const config = getConfig();
-
-            // Обновляем file_view
-            // Берём file_id из плеера; маппинг с сервера — только fallback,
-            // и только если этот file_id ещё не «занят» другим tmdb в локальном кэше.
-            let fileId = getCurrentFileId();
-            
-            if (!fileId && data.file_mapping && tmdbId) {
-                for (const [fid, tmdb] of Object.entries(data.file_mapping)) {
-                    if (String(tmdb) === String(tmdbId)) {
-                        fileId = fid;
-                        console.log('[Lampa Sync] Found file_id from mapping:', fileId, 'for tmdb:', tmdbId);
-                        break;
-                    }
-                }
-            }
-            
             const urlTmdbIdCheck = getTmdbIdFromUrl();
             if (urlTmdbIdCheck && parseInt(urlTmdbIdCheck) !== parseInt(tmdbId)) {
                 console.warn('[Lampa Sync] TMDB mismatch when applying - skip');
                 return data;
             }
-            
-            if (fileId && data.time !== undefined && data.percent !== undefined) {
-                // Не подменяем server mapping на «текущий» fileId — это давало чужие ключи
-                
-                const fileView = getStorage('file_view', {});
-                
-                if (fileView[fileId]) {
-                    // Обновляем только если время > MIN_SEEK_TIME
-                    if (data.time >= config.MIN_SEEK_TIME) {
-                        const oldTime = fileView[fileId].time || 0;
-                        const oldPercent = fileView[fileId].percent || 0;
-                        
-                        // Обновляем только если новый прогресс больше старого
-                        if (data.time > oldTime || (data.time === oldTime && data.percent > oldPercent)) {
-                            fileView[fileId].time = data.time;
-                            fileView[fileId].percent = data.percent;
-                            setStorage('file_view', fileView);
-                            console.log('[Lampa Sync] ✅ Progress applied to file_view[' + fileId + ']:', {
-                                oldTime: oldTime,
-                                newTime: data.time,
-                                oldPercent: oldPercent,
-                                newPercent: data.percent
-                            });
-                            
-                            // Обновляем lastFileViewTime для отслеживания
-                            lastFileViewTime[fileId] = data.time;
-                            lastFileViewTime[fileId + '_percent'] = data.percent;
-                            lastFileViewTime[fileId + '_timestamp'] = Date.now();
-                            
-                            // Обновляем UI после изменения прогресса (только если это текущий фильм)
-                            if (urlTmdbIdCheck && parseInt(urlTmdbIdCheck) === parseInt(tmdbId)) {
-                                updateUIAfterProgressChange(fileId, tmdbId);
-                            }
-                        } else {
-                            console.log('[Lampa Sync] Progress not applied - current progress is newer or equal');
-                        }
-                    }
-                } else {
-                    // Создаём новую запись только если это текущий открытый фильм
-                    if (urlTmdbIdCheck && parseInt(urlTmdbIdCheck) === parseInt(tmdbId)) {
-                        console.warn('[Lampa Sync] file_view[' + fileId + '] not found, creating entry');
-                        fileView[fileId] = {
-                            time: data.time >= config.MIN_SEEK_TIME ? data.time : 0,
-                            percent: data.percent || 0,
-                            duration: 0,
-                            profile: 'default'
-                        };
-                        setStorage('file_view', fileView);
-                        
-                        // Обновляем lastFileViewTime
-                        lastFileViewTime[fileId] = fileView[fileId].time;
-                        lastFileViewTime[fileId + '_percent'] = fileView[fileId].percent;
-                        lastFileViewTime[fileId + '_timestamp'] = Date.now();
-                        
-                        // Обновляем UI после создания новой записи
-                        updateUIAfterProgressChange(fileId, tmdbId);
-                    } else {
-                        console.log('[Lampa Sync] Skipping file_view creation - not current movie');
-                    }
-                }
-            } else {
-                console.warn('[Lampa Sync] Cannot find file_id for tmdb:', tmdbId, '- progress not applied to file_view');
-                // Сохраняем прогресс для применения позже, когда file_id появится
-                if (data.time !== undefined && data.percent !== undefined) {
-                    pendingProgress = {
-                        tmdbId: tmdbId,
-                        time: data.time,
-                        percent: data.percent
+
+            // Пишем в локальные Timeline-hash (title/name) + маппинг с сервера —
+            // иначе прогресс с ТВ не виден на ПК (hash разные).
+            const fvKey = fileViewStorageKey();
+            const fileView = getStorage(fvKey, {}) || {};
+            const cards = ((getStorage('favorite', {}) || {}).card) || [];
+            const applied = applyProgressToFileView(fileView, tmdbId, data, cards);
+
+            // Также текущий file_id из плеера (если уже открыт)
+            const currentFileId = getCurrentFileId();
+            if (currentFileId && data.time !== undefined) {
+                const local = fileView[currentFileId] || { time: 0, percent: 0, duration: 0, profile: 'default' };
+                const serverTime = Number(data.time) || 0;
+                const serverPercent = Number(data.percent) || 0;
+                if (serverTime >= config.MIN_SEEK_TIME &&
+                    (serverTime > (Number(local.time) || 0) || serverPercent > (Number(local.percent) || 0) || !fileView[currentFileId])) {
+                    fileView[currentFileId] = {
+                        ...local,
+                        time: Math.max(Number(local.time) || 0, serverTime),
+                        percent: Math.max(Number(local.percent) || 0, serverPercent),
+                        duration: local.duration || 0,
+                        profile: local.profile || 'default'
                     };
-                    console.log('[Lampa Sync] Progress saved for later application:', pendingProgress);
+                    rememberFileMap(currentFileId, tmdbId);
                 }
+            }
+
+            if (applied > 0 || currentFileId) {
+                setStorage(fvKey, fileView);
+                const uiFileId = currentFileId || localHashesForTmdb(tmdbId, cards)[0];
+                if (uiFileId && data.time !== undefined) {
+                    lastFileViewTime[uiFileId] = data.time;
+                    lastFileViewTime[uiFileId + '_percent'] = data.percent;
+                    lastFileViewTime[uiFileId + '_timestamp'] = Date.now();
+                    if (urlTmdbIdCheck && parseInt(urlTmdbIdCheck) === parseInt(tmdbId)) {
+                        updateUIAfterProgressChange(uiFileId, tmdbId);
+                    }
+                }
+                console.log('[Lampa Sync] ✅ Progress applied for tmdb', tmdbId, 'keys:', applied);
+            } else if (data.time !== undefined && data.percent !== undefined) {
+                saveTmdbProgressCache(tmdbId, data.time, data.percent);
+                pendingProgress = {
+                    tmdbId: tmdbId,
+                    time: data.time,
+                    percent: data.percent,
+                    file_mapping: data.file_mapping || {}
+                };
+                console.log('[Lampa Sync] Progress cached for later (no local hash yet):', pendingProgress);
             }
 
             // Favorite больше не тянем из per-movie записи (см. syncAll / pushFavorite)
@@ -1416,14 +1377,102 @@
         return out;
     }
 
+    /** Локальные hash Timeline для tmdb (title/name + кэш маппинга). */
+    function localHashesForTmdb(tmdb, cards) {
+        const tid = String(tmdb);
+        const hashes = new Set();
+        const fmap = loadFileMap();
+        Object.keys(fmap).forEach((fid) => {
+            if (String(fmap[fid]) === tid) hashes.add(String(fid));
+        });
+        (cards || []).forEach((card) => {
+            if (!card || String(card.id) !== tid) return;
+            if (!window.Lampa || !Lampa.Utils || typeof Lampa.Utils.hash !== 'function') return;
+            try {
+                ['original_title', 'title', 'original_name', 'name'].forEach((field) => {
+                    if (card[field]) hashes.add(String(Lampa.Utils.hash(card[field])));
+                });
+            } catch (_) {}
+        });
+        hashes.delete(tid);
+        return [...hashes];
+    }
+
+    function saveTmdbProgressCache(tmdb, time, percent) {
+        try {
+            const key = 'lampasync_tmdb_progress';
+            const all = JSON.parse(localStorage.getItem(key) || '{}');
+            const prev = all[String(tmdb)] || {};
+            all[String(tmdb)] = {
+                time: Math.max(Number(prev.time) || 0, Number(time) || 0),
+                percent: Math.max(Number(prev.percent) || 0, Number(percent) || 0),
+                updated: Date.now()
+            };
+            localStorage.setItem(key, JSON.stringify(all));
+        } catch (_) {}
+    }
+
+    function readTmdbProgressCache(tmdb) {
+        try {
+            const all = JSON.parse(localStorage.getItem('lampasync_tmdb_progress') || '{}');
+            return all[String(tmdb)] || null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    /**
+     * Пишет серверный прогресс в локальный file_view по всем известным hash
+     * (маппинг с сервера + hash названия на этом устройстве).
+     */
+    function applyProgressToFileView(fileView, tmdb, rec, cards) {
+        if (!fileView || !rec) return 0;
+        const serverTime = Number(rec.time) || 0;
+        const serverPercent = Number(rec.percent) || 0;
+        if (serverTime <= 0 && serverPercent <= 0) return 0;
+
+        saveTmdbProgressCache(tmdb, serverTime, serverPercent);
+
+        const mapping = rec.file_mapping || {};
+        const fromServer = Object.keys(mapping).filter((fid) => String(mapping[fid]) === String(tmdb));
+        const targets = new Set([...fromServer, ...localHashesForTmdb(tmdb, cards)]);
+        if (!targets.size) return 0;
+
+        let applied = 0;
+        targets.forEach((fileId) => {
+            if (!fileId || String(fileId) === String(tmdb)) return;
+            const local = fileView[fileId] || { time: 0, percent: 0, duration: 0, profile: 'default' };
+            const localTime = Number(local.time) || 0;
+            const localPercent = Number(local.percent) || 0;
+            if (serverTime > localTime || serverPercent > localPercent || !fileView[fileId]) {
+                fileView[fileId] = {
+                    ...local,
+                    time: Math.max(localTime, serverTime),
+                    percent: Math.max(localPercent, serverPercent),
+                    duration: local.duration || 0,
+                    profile: local.profile || 'default'
+                };
+                rememberFileMap(fileId, tmdb);
+                applied++;
+            }
+        });
+        return applied;
+    }
+
     /**
      * Выгрузка локального file_view на сервер (только с известным tmdb, max-merge).
+     * По одному tmdb — один POST: предпочитаем hash названия фильма, не «чужие» ключи.
      */
     async function pushLocalProgress(progressMap, cards) {
         const config = getConfig();
         const fileView = readLocalFileView();
         const fmap = loadFileMap();
         const hashMap = buildHashToTmdb(cards);
+        const titleHashSet = new Set();
+        (cards || []).forEach((card) => {
+            if (!card || card.id == null) return;
+            localHashesForTmdb(card.id, [card]).forEach((h) => titleHashSet.add(String(h)));
+        });
 
         Object.keys(progressMap || {}).forEach((tmdb) => {
             const mapping = (progressMap[tmdb] && progressMap[tmdb].file_mapping) || {};
@@ -1435,61 +1484,79 @@
         let uploaded = 0;
         let skipped = 0;
         let unknown = 0;
+        const bestByTmdb = {};
 
-        const entries = Object.keys(fileView);
-        for (let i = 0; i < entries.length; i++) {
-            const fileId = entries[i];
+        Object.keys(fileView).forEach((fileId) => {
             const rec = fileView[fileId];
-            if (!rec || typeof rec !== 'object') continue;
+            if (!rec || typeof rec !== 'object') return;
 
             const time = Number(rec.time) || 0;
             const percent = Number(rec.percent) || 0;
             if (time < config.MIN_SEEK_TIME) {
                 skipped++;
-                continue;
+                return;
             }
             if (percent >= config.REMOVE_AT_PERCENT) {
                 skipped++;
-                continue;
+                return;
             }
 
             const tmdb = fmap[String(fileId)] || hashMap[String(fileId)] || null;
             if (!tmdb || String(fileId) === String(tmdb)) {
                 unknown++;
-                continue;
+                return;
             }
 
-            const serverRec = (progressMap || {})[String(tmdb)] || (progressMap || {})[tmdb];
+            const isTitle = titleHashSet.has(String(fileId));
+            const prev = bestByTmdb[String(tmdb)];
+            if (!prev) {
+                bestByTmdb[String(tmdb)] = { fileId, time, percent, isTitle };
+                return;
+            }
+            // title-hash важнее «угаданных» эпизодных ключей (они раздували time)
+            if (isTitle && !prev.isTitle) {
+                bestByTmdb[String(tmdb)] = { fileId, time, percent, isTitle };
+                return;
+            }
+            if (isTitle === prev.isTitle && (time > prev.time || percent > prev.percent)) {
+                bestByTmdb[String(tmdb)] = { fileId, time, percent, isTitle };
+            }
+        });
+
+        const tmids = Object.keys(bestByTmdb);
+        for (let i = 0; i < tmids.length; i++) {
+            const tmdb = tmids[i];
+            const best = bestByTmdb[tmdb];
+            const serverRec = (progressMap || {})[tmdb] || (progressMap || {})[String(tmdb)];
             const serverTime = serverRec ? (Number(serverRec.time) || 0) : 0;
             const serverPercent = serverRec ? (Number(serverRec.percent) || 0) : 0;
-            if (time <= serverTime && percent <= serverPercent) {
+            if (best.time <= serverTime && best.percent <= serverPercent) {
                 skipped++;
-                rememberFileMap(fileId, tmdb);
+                rememberFileMap(best.fileId, tmdb);
                 continue;
             }
 
             try {
                 await apiRequest('/progress', 'POST', {
                     tmdb: tmdb,
-                    time: time,
-                    percent: percent,
-                    file_id: fileId,
-                    // _seed → на сервере max с другим device (не затрём больший чужой прогресс)
+                    time: best.time,
+                    percent: best.percent,
+                    file_id: best.fileId,
                     device_id: getDeviceId() + '_seed'
                 });
-                fmap[String(fileId)] = String(tmdb);
+                fmap[String(best.fileId)] = String(tmdb);
                 uploaded++;
                 progressMap[String(tmdb)] = {
                     ...(serverRec || {}),
-                    time: Math.max(serverTime, time),
-                    percent: Math.max(serverPercent, percent),
+                    time: Math.max(serverTime, best.time),
+                    percent: Math.max(serverPercent, best.percent),
                     file_mapping: {
                         ...((serverRec && serverRec.file_mapping) || {}),
-                        [String(fileId)]: tmdb
+                        [String(best.fileId)]: tmdb
                     }
                 };
             } catch (e) {
-                console.warn('[Lampa Sync] seed progress failed', fileId, e.message || e);
+                console.warn('[Lampa Sync] seed progress failed', best.fileId, e.message || e);
             }
         }
 
@@ -1678,64 +1745,29 @@
                 } catch (_) {}
             }
 
-            // 2) Сервер → локальный file_view (max)
+            // 2) Сервер → локальный file_view (max) по title-hash этого устройства
             const progressMap = data.progress || {};
             const fvKey = fileViewStorageKey();
             const fileView = getStorage(fvKey, {}) || {};
+            const cards = (mergedFavorite && mergedFavorite.card) || (getStorage('favorite', {}) || {}).card || [];
             let applied = 0;
-
-            const owners = {};
-            Object.keys(progressMap).forEach((tmdb) => {
-                const mapping = (progressMap[tmdb] && progressMap[tmdb].file_mapping) || {};
-                Object.keys(mapping).forEach((fid) => {
-                    if (String(mapping[fid]) !== String(tmdb)) return;
-                    if (!owners[fid]) owners[fid] = [];
-                    owners[fid].push(tmdb);
-                    rememberFileMap(fid, tmdb);
-                });
-            });
 
             Object.keys(progressMap).forEach((tmdb) => {
                 const rec = progressMap[tmdb];
                 if (!rec || typeof rec.time !== 'number') return;
-
                 const mapping = rec.file_mapping || {};
-                let fileIds = Object.keys(mapping).filter((fid) => String(mapping[fid]) === String(tmdb));
-                fileIds = fileIds.filter((fid) => (owners[fid] || []).length <= 1);
-                if (!fileIds.length) return;
-
-                fileIds.forEach((fileId) => {
-                    const local = fileView[fileId] || { time: 0, percent: 0, duration: 0, profile: 'default' };
-                    const serverTime = rec.time || 0;
-                    const serverPercent = rec.percent || 0;
-                    const localTime = local.time || 0;
-                    const localPercent = local.percent || 0;
-
-                    if (serverTime > localTime || serverPercent > localPercent) {
-                        fileView[fileId] = {
-                            ...local,
-                            time: Math.max(localTime, serverTime),
-                            percent: Math.max(localPercent, serverPercent)
-                        };
-                        applied++;
-                    } else if (!fileView[fileId] && serverTime > 0) {
-                        fileView[fileId] = {
-                            time: serverTime,
-                            percent: serverPercent,
-                            duration: local.duration || 0,
-                            profile: 'default'
-                        };
-                        applied++;
-                    }
+                Object.keys(mapping).forEach((fid) => {
+                    if (String(mapping[fid]) === String(tmdb)) rememberFileMap(fid, tmdb);
                 });
+                applied += applyProgressToFileView(fileView, tmdb, rec, cards);
             });
 
             if (applied > 0) {
                 setStorage(fvKey, fileView);
+                console.log('[Lampa Sync] progress applied to local file_view keys:', applied);
             }
 
             // 3) Локальный file_view → сервер (только с известным tmdb, без понижения)
-            const cards = (mergedFavorite && mergedFavorite.card) || (getStorage('favorite', {}) || {}).card || [];
             let seed = { uploaded: 0, skipped: 0, unknown: 0 };
             try {
                 seed = await pushLocalProgress(progressMap, cards);
@@ -1937,7 +1969,7 @@
                 name: 'Lampa Sync',
                 author: '@kotopheiop',
                 descr: 'Синхронизация прогресса, истории и закладок между устройствами',
-                version: '1.4.0'
+                version: '1.4.1'
             };
 
             const ourBase = (PLUGIN_SCRIPT_URL || '').split('?')[0];
