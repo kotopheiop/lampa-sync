@@ -450,6 +450,8 @@
             if (data && data.ok && data.auth) {
                 const hist = data.history != null ? data.history : '?';
                 setStatus('OK · ' + ms + ' мс · прогресс: ' + (data.records || 0) + ' · история: ' + hist, true);
+                // После проверки сразу тянем favorite/progress (важно для нового устройства)
+                try { await syncAll(); } catch (_) {}
                 return true;
             }
             setStatus('Ответ сервера без ok/auth', false);
@@ -1134,23 +1136,39 @@
                 return null;
             }
 
-            // 1) Favorite: last-write-wins по updated (удаления не возвращаются через union)
+            // 1) Favorite
+            // Правило: пустое устройство всегда тянет сервер;
+            // иначе last-write-wins по updated (чтобы удаления не возвращались).
             let mergedFavorite = null;
             if (data.favorite) {
                 let localPushed = null;
                 try { localPushed = localStorage.getItem('lampasync_favorite_pushed_at'); } catch (_) {}
                 const serverUpdated = data.favorite_updated || data.favorite.updated || null;
-                const serverIsNewer = serverUpdated && (!localPushed || new Date(serverUpdated) >= new Date(localPushed));
+                const localFav = getStorage('favorite', {}) || {};
+                const localHistLen = (localFav.history || []).length;
+                const serverHistLen = (data.favorite.history || []).length;
+                const localEmpty = localHistLen === 0 && (localFav.book || []).length === 0;
+                const serverIsNewer = !!(serverUpdated && (!localPushed || new Date(serverUpdated) >= new Date(localPushed)));
+                const shouldPull = localEmpty || serverIsNewer || (serverHistLen > 0 && localHistLen === 0);
 
-                if (serverIsNewer) {
+                if (shouldPull) {
                     mergedFavorite = applyFavoriteFromServer(data.favorite);
-                    try { localStorage.setItem('lampasync_favorite_pushed_at', serverUpdated); } catch (_) {}
-                    console.log('[Lampa Sync] favorite applied from server:', {
+                    try {
+                        localStorage.setItem(
+                            'lampasync_favorite_pushed_at',
+                            serverUpdated || new Date().toISOString()
+                        );
+                    } catch (_) {}
+                    console.log('[Lampa Sync] favorite pulled from server:', {
                         history: (mergedFavorite.history || []).length,
-                        book: (mergedFavorite.book || []).length
+                        book: (mergedFavorite.book || []).length,
+                        reason: localEmpty ? 'local-empty' : 'server-newer'
                     });
+                    // Дождаться названий — иначе история на новом устройстве пустая/без постеров
+                    try {
+                        mergedFavorite = await enrichStubCards(mergedFavorite);
+                    } catch (_) {}
                 } else {
-                    // Локальные изменения новее — пушим на сервер
                     await pushFavorite('syncAll-local-newer');
                     mergedFavorite = getStorage('favorite', {});
                     console.log('[Lampa Sync] favorite kept local & pushed');
@@ -1215,7 +1233,7 @@
                 setStorage('file_view', fileView);
             }
 
-            // Перечитываем favorite в памяти Lampa
+            // Перечитываем favorite в памяти Lampa (после apply + enrich)
             try {
                 if (window.Lampa && Lampa.Favorite) {
                     if (typeof Lampa.Favorite.read === 'function') Lampa.Favorite.read();
@@ -1225,11 +1243,6 @@
                     Lampa.Listener.send('state:changed', { target: 'favorite', reason: 'sync' });
                 }
             } catch (_) {}
-
-            // 3) Догружаем названия/постеры для заглушек
-            if (mergedFavorite) {
-                enrichStubCards(mergedFavorite).catch(() => {});
-            }
 
             console.log('[Lampa Sync] ✅ Full sync done:', {
                 records: data.records,
